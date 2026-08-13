@@ -1,0 +1,15 @@
+{
+  "name": "chrome-agent-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local MCP server letting Claude Code and Codex control the user's normal Chrome, no debug port.",
+  "scripts": {
+    "test": "node --test lib/**/*.test.js host/**/*.test.js scripts/**/*.test.js",
+    "install-bridge": "node scripts/install.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.3",
+    "zod": "^3.23.8"
+  }
+}

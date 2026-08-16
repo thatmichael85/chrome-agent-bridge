@@ -20,7 +20,7 @@ const TOOLS = [
   ['list_tabs', 'List all open tabs', {}],
   ['new_tab', 'Open a new tab at a URL. It joins your session\'s tab group and becomes your active default tab.', { url: z.string() }],
   ['switch_tab', 'Focus a tab by id in the browser UI', { tabId: z.number() }],
-  ['close_tab', 'Close a tab by id', { tabId: z.number() }],
+  ['close_tab', 'Close a tab by id. Omitting tabId closes your session\'s current active tab.', { tabId: z.number().optional() }],
   ['wait_for', 'Wait for a CSS selector to appear in the page', { selector: z.string(), timeoutMs: z.number().optional(), tabId: z.number().optional() }],
   ['use_tab', 'Switch which of your own tabs subsequent commands target by default when tabId is omitted. No browser round-trip.', { tabId: z.number() }],
   ['list_my_tabs', 'List the tabIds you own and your current active default tab. No browser round-trip.', {}],

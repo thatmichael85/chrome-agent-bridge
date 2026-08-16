@@ -81,3 +81,65 @@ test('full stack: MCP tool calls flow through adapter and relay to the extension
     fs.rmSync(tmpHome, { recursive: true, force: true });
   }
 });
+
+// Every other tabId-taking tool (navigate, click, type, ...) declares tabId
+// optional so an omitted tabId falls back to the session's active tab (see
+// README "Sessions, tabs, and concurrent agents"). relay.js implements that
+// same fallback for close_tab specifically -- but the MCP tool schema must
+// actually allow omitting tabId for that fallback to ever be reachable from
+// a real client.
+test('close_tab: omitting tabId closes the session\'s current active tab (matches every other tabId-taking tool)', async () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cab-fullstack-closetab-'));
+  const config = { token: 'fullstack-token-' + Date.now(), port: 8990 + (process.pid % 100) };
+  fs.writeFileSync(path.join(tmpHome, 'config.json'), JSON.stringify(config));
+
+  const host = spawn(process.execPath, [path.join(__dirname, '..', 'host', 'native-host.js')], {
+    env: { ...process.env, CHROME_AGENT_BRIDGE_HOME: tmpHome },
+  });
+
+  let client;
+  try {
+    let nextTabId = 100;
+    const closeTabCalls = [];
+    const decoder = new MessageDecoder((msg) => {
+      if (msg.command === 'new_tab') {
+        host.stdin.write(encodeMessage({ id: msg.id, result: { tabId: nextTabId++, groupId: 1 } }));
+      } else if (msg.command === 'close_tab') {
+        closeTabCalls.push(msg.params);
+        host.stdin.write(encodeMessage({ id: msg.id, result: { ok: true } }));
+      } else {
+        host.stdin.write(encodeMessage({ id: msg.id, result: { ok: true } }));
+      }
+    });
+    host.stdout.on('data', (chunk) => decoder.push(chunk));
+
+    const WebSocket = require('ws');
+    for (let i = 0; i < 50; i++) {
+      const probe = new WebSocket(`ws://127.0.0.1:${config.port}`);
+      const up = await new Promise((resolve) => {
+        probe.once('open', () => resolve(true));
+        probe.once('error', () => resolve(false));
+      });
+      probe.close();
+      if (up) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [path.join(__dirname, 'index.js')],
+      env: { ...process.env, CHROME_AGENT_BRIDGE_HOME: tmpHome },
+    });
+    client = new Client({ name: 'fullstack-closetab-test', version: '1.0.0' });
+    await client.connect(transport);
+
+    // Auth-time provisioning assigns tabId 100 as this session's active tab.
+    const closeResult = await client.callTool({ name: 'close_tab', arguments: {} });
+    assert.notStrictEqual(closeResult.isError, true, `close_tab with no tabId should succeed: ${JSON.stringify(closeResult)}`);
+    assert.deepStrictEqual(closeTabCalls, [{ tabId: 100 }]);
+  } finally {
+    if (client) await client.close().catch(() => {});
+    host.kill();
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});

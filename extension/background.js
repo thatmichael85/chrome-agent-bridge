@@ -2,6 +2,35 @@ const HOST_NAME = 'com.chromeagentbridge.host';
 
 let port = null;
 
+// Tabs an agent has asked the user to look at. switch_tab never changes focus;
+// it raises a signal here, and the signal clears only when the user actually
+// visits the tab (or closes it). See switch_tab below.
+// tabId -> the group recolored for it. Storing the group (rather than looking
+// it up on clear) means the highlight still gets undone when the signal clears
+// because the tab was *closed*, at which point the tab can no longer be read.
+const signalledTabs = new Map();
+const GROUP_COLOR_IDLE = 'blue';
+const GROUP_COLOR_SIGNALLED = 'orange';
+
+async function clearSignal(tabId) {
+  if (!signalledTabs.has(tabId)) return;
+  const groupId = signalledTabs.get(tabId);
+  signalledTabs.delete(tabId);
+  if (groupId != null) {
+    try {
+      await chrome.tabGroups.update(groupId, { color: GROUP_COLOR_IDLE });
+    } catch (err) {
+      // Group is gone too (that was its last tab) -- nothing to un-highlight.
+    }
+  }
+  if (signalledTabs.size === 0) {
+    await chrome.action.setBadgeText({ text: '' });
+  }
+}
+
+chrome.tabs.onActivated.addListener(({ tabId }) => clearSignal(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => clearSignal(tabId));
+
 function connect() {
   port = chrome.runtime.connectNative(HOST_NAME);
   port.onMessage.addListener(handleMessage);
@@ -23,9 +52,11 @@ async function handleMessage(message) {
 
 async function targetTabId(params) {
   if (params.tabId) return params.tabId;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error('no active tab');
-  return tab.id;
+  // The relay injects the session's own tabId into every command, so a missing
+  // one means the session currently owns no tab (e.g. it just closed its last).
+  // Never silently fall back to whatever tab the user has focused — that would
+  // run agent commands against their browsing. Fail loudly instead.
+  throw new Error('no tab for this session — open one with new_tab, or pass an explicit tabId');
 }
 
 function waitForLoad(tabId) {
@@ -52,7 +83,11 @@ const commands = {
     return tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active }));
   },
   async new_tab(params) {
-    const tab = await chrome.tabs.create({ url: params.url });
+    // Background by default: agent tabs must never steal focus from whatever
+    // the user is doing. They still open in the user's window (visible in the
+    // tab strip, in the session's labeled group) — just not focused. An agent
+    // that genuinely needs the tab in front calls switch_tab explicitly.
+    const tab = await chrome.tabs.create({ url: params.url, active: false });
     let groupId = null;
     if (params.groupId != null) {
       await chrome.tabs.group({ tabIds: [tab.id], groupId: params.groupId });
@@ -64,8 +99,21 @@ const commands = {
     return { tabId: tab.id, groupId };
   },
   async switch_tab(params) {
-    await chrome.tabs.update(params.tabId, { active: true });
-    return { ok: true };
+    // Signals for attention; never focuses. The agent can say "look at this",
+    // but only the user decides when to actually look -- so this must not
+    // interrupt whatever they're currently doing. The badge is deliberately
+    // global rather than per-tab: the user is by definition looking somewhere
+    // else, so it has to be visible from wherever they are.
+    const tabId = params.tabId;
+    const tab = await chrome.tabs.get(tabId);
+    const grouped = tab.groupId != null && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE;
+    signalledTabs.set(tabId, grouped ? tab.groupId : null);
+    await chrome.action.setBadgeText({ text: '●' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#d93025' });
+    if (grouped) {
+      await chrome.tabGroups.update(tab.groupId, { color: GROUP_COLOR_SIGNALLED });
+    }
+    return { ok: true, focused: false, signalled: true };
   },
   async close_tab(params) {
     await chrome.tabs.remove(params.tabId);
@@ -74,8 +122,39 @@ const commands = {
   async screenshot(params) {
     const tabId = await targetTabId(params);
     const tab = await chrome.tabs.get(tabId);
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    return { dataUrl };
+    // captureVisibleTab can only ever capture the window's *active* tab. Agent
+    // tabs open in the background, so without this the capture would silently
+    // return whatever the user is looking at instead of the requested tab —
+    // wrong result and a privacy leak. Focus the target for the capture only,
+    // then hand the user's tab straight back.
+    let restoreTabId = null;
+    if (!tab.active) {
+      const [userTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+      if (userTab && userTab.id !== tabId) restoreTabId = userTab.id;
+      await chrome.tabs.update(tabId, { active: true });
+    }
+    let dataUrl;
+    try {
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 });
+    } finally {
+      if (restoreTabId != null) await chrome.tabs.update(restoreTabId, { active: true });
+    }
+    // JPEG + downscale: a full-res Retina PNG base64s to hundreds of KB of
+    // text in the consuming agent's context; ~1280px JPEG is 20-40x smaller
+    // and still perfectly readable for layout/content checks.
+    const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    const maxWidth = 1280;
+    if (bitmap.width <= maxWidth) return { dataUrl };
+    const scale = maxWidth / bitmap.width;
+    const canvas = new OffscreenCanvas(maxWidth, Math.round(bitmap.height * scale));
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.6 });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 32768) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    }
+    return { dataUrl: `data:image/jpeg;base64,${btoa(binary)}` };
   },
   async get_text(params) {
     const tabId = await targetTabId(params);

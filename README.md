@@ -102,8 +102,8 @@ You have 15 tools, identical whether you're Claude Code or Codex:
 | `evaluate` | `expression`, `tabId?` | Run arbitrary JS in the page's own context, return the result |
 | `wait_for` | `selector`, `timeoutMs?`, `tabId?` | Poll until a selector appears (default 10s timeout) |
 | `list_tabs` | — | List **every** open tab in the browser (not just yours) |
-| `new_tab` | `url` | Open a tab; joins your session's tab group, becomes your new active tab |
-| `switch_tab` | `tabId` | Focus a tab in the actual browser UI (visually switches to it) |
+| `new_tab` | `url` | Open a tab **in the background**; joins your session's tab group, becomes your new active tab |
+| `switch_tab` | `tabId` | Signal for the user's attention on one of your tabs (badge + group highlight). Never changes focus |
 | `close_tab` | `tabId` | Close a tab |
 | `use_tab` | `tabId` | Switch your active default among tabs *you already own* — no browser round-trip |
 | `list_my_tabs` | — | List the tabIds you own + your current active one — no browser round-trip |
@@ -118,6 +118,16 @@ called anything, you already own one tab (auto-provisioned, sitting in its
 own labeled tab group in the user's Chrome so they can see which tabs are
 yours). Call `list_my_tabs` any time to check what you own and which one
 is currently active, with no network/browser cost.
+
+**Agent tabs never steal focus — this is enforced, not advisory.** Tabs
+you open are created in the background: visible in the user's tab strip,
+in your labeled group, but not focused. No tool can move the user off the
+tab they're on. When you want to show them something, `switch_tab` raises
+a signal — it badges the extension icon and turns your tab group orange —
+and the user clicks over when they're ready; it returns `focused: false`
+to say so plainly. The signal clears once they visit the tab.
+(`screenshot` is the one exception: it briefly focuses your tab because
+Chrome can only capture the visible one, then restores theirs.)
 
 **Working with more than one tab:** call `new_tab` to open another — it
 joins your existing group and becomes the new active default. Switch back
@@ -149,8 +159,13 @@ adapter fails to start with a clear stderr message rather than hanging.
 - The extension's ID is pinned via a generated RSA keypair embedded in
   `extension/manifest.json`, so the native-messaging-host manifest can name
   an exact, stable `chrome-extension://<id>/` in `allowed_origins`.
-- Tab ownership is enforced relay-side: one session cannot `use_tab`
-  another session's tab.
+- Tab ownership is enforced relay-side on **every** tab-targeting command,
+  not just `use_tab`: passing an explicit `tabId` you don't own is rejected
+  with `not your tab: <id>`. A session cannot navigate, click, type,
+  evaluate, screenshot, or close another session's tabs — or any of the
+  user's own tabs — even though `list_tabs` reveals their ids.
+- No tool can pull the user's focus. Agent tabs open in the background and
+  `switch_tab` only raises a passive signal.
 
 ## Troubleshooting
 

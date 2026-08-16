@@ -8,8 +8,13 @@ class FakeSocket extends EventEmitter {
   constructor() {
     super();
     this.sent = [];
+    this.closed = false;
+    // Mirror real WebSocket behavior: emitting 'close' means send() should
+    // start throwing, the way `ws` throws "WebSocket is not open" post-close.
+    this.on('close', () => { this.closed = true; });
   }
   send(data) {
+    if (this.closed) throw new Error('WebSocket is not open');
     this.sent.push(JSON.parse(data));
   }
 }
@@ -69,4 +74,50 @@ test('sendCommand rejects if the socket closes while a command is still pending'
   const promise = client.sendCommand('navigate', { url: 'https://x.com' });
   socket.emit('close');
   await assert.rejects(promise, /connection closed/);
+});
+
+test('a fixed socket (no createSocket factory) does not auto-reconnect', async () => {
+  const socket = new FakeSocket();
+  const client = createRelayClient({ socket, token: 'secret' });
+  socket.emit('open');
+  socket.emit('message', Buffer.from(JSON.stringify({ type: 'auth_ok' })));
+  await client.ready;
+
+  socket.emit('close');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await assert.rejects(client.sendCommand('navigate', { url: 'https://x.com' }));
+});
+
+test('with a createSocket factory, the client reconnects and resumes commands after the relay drops', async () => {
+  const sockets = [];
+  function createSocket() {
+    const s = new FakeSocket();
+    sockets.push(s);
+    return s;
+  }
+
+  const client = createRelayClient({ createSocket, token: 'secret', reconnectDelayMs: 5 });
+  assert.strictEqual(sockets.length, 1);
+  const first = sockets[0];
+  first.emit('open');
+  first.emit('message', Buffer.from(JSON.stringify({ type: 'auth_ok' })));
+  await client.ready;
+
+  // Simulate the relay/native host restarting out from under an already-connected client.
+  first.emit('close');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.strictEqual(sockets.length, 2, 'a new socket should have been created after close');
+
+  const second = sockets[1];
+  second.emit('open');
+  second.emit('message', Buffer.from(JSON.stringify({ type: 'auth_ok' })));
+  await client.ready;
+
+  const promise = client.sendCommand('navigate', { url: 'https://x.com' });
+  const sentCommand = second.sent.find((m) => m.type === 'command');
+  assert.ok(sentCommand, 'command should be sent on the reconnected socket');
+  second.emit('message', Buffer.from(JSON.stringify({ type: 'response', id: sentCommand.id, result: { ok: true } })));
+
+  assert.deepStrictEqual(await promise, { ok: true });
 });

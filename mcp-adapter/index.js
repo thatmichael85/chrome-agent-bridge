@@ -36,7 +36,11 @@ async function main() {
     });
     return sock;
   };
-  const relay = createRelayClient({ createSocket, token: config.token });
+  // Stable for this adapter process, i.e. for the life of the agent session.
+  // Reconnects present it so the relay resumes our tabs rather than opening new
+  // ones and orphaning the old.
+  const sessionId = require('crypto').randomUUID();
+  const relay = createRelayClient({ createSocket, token: config.token, sessionId });
 
   await relay.ready;
 

@@ -113,11 +113,14 @@ You have 15 tools, identical whether you're Claude Code or Codex:
 or pass a tabId at all for straight-line, single-tab work. Just call
 `navigate`, `click`, `get_text`, etc. and they land on your own tab.
 
-You get that tab automatically — the moment you connect, before you've
-called anything, you already own one tab (auto-provisioned, sitting in its
-own labeled tab group in the user's Chrome so they can see which tabs are
-yours). Call `list_my_tabs` any time to check what you own and which one
-is currently active, with no network/browser cost.
+You get that tab automatically, on first use — the first command that
+needs one creates it (in the background, in its own labeled tab group so
+the user can see which tabs are yours) and runs against it. Connecting
+alone opens nothing: a session that never browses costs the user no tabs,
+which matters because every agent session connects whether or not it ever
+touches Chrome. Call `list_my_tabs` any time to check what you own and
+which one is currently active, with no network/browser cost — it returns
+an empty list until your first browser command.
 
 **Agent tabs never steal focus — this is enforced, not advisory.** Tabs
 you open are created in the background: visible in the user's tab strip,

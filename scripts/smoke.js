@@ -35,11 +35,15 @@ function check(label, ok, detail) {
 
   const lmt = await client.callTool({ name: 'list_my_tabs', arguments: {} });
   const owned = JSON.parse(lmt.content[0].text);
-  check('session auto-owns 1 tab on connect (no explicit new_tab needed)', owned.tabIds.length === 1, JSON.stringify(owned));
-  const defaultTabId = owned.activeTabId;
+  check('connecting alone opens no tab (provisioning is lazy)', owned.tabIds.length === 0, JSON.stringify(owned));
 
   const navDefault = await client.callTool({ name: 'navigate', arguments: { url: 'https://example.com' } });
-  check('navigate with no tabId targets the auto-provisioned default tab', !navDefault.isError, JSON.stringify(JSON.parse(navDefault.content[0].text)));
+  check('navigate with no tabId provisions a tab on demand and targets it', !navDefault.isError, JSON.stringify(JSON.parse(navDefault.content[0].text)));
+
+  const lmtAfter = await client.callTool({ name: 'list_my_tabs', arguments: {} });
+  const ownedAfter = JSON.parse(lmtAfter.content[0].text);
+  check('the session now owns exactly the one tab it needed', ownedAfter.tabIds.length === 1, JSON.stringify(ownedAfter));
+  const defaultTabId = ownedAfter.activeTabId;
 
   const nt = await client.callTool({ name: 'new_tab', arguments: { url: 'https://example.com' } });
   const { tabId, groupId } = JSON.parse(nt.content[0].text);
@@ -75,9 +79,12 @@ function check(label, ok, detail) {
   const transport2 = new StdioClientTransport({ command: process.execPath, args: [ADAPTER_PATH] });
   const client2 = new Client({ name: 'smoke-test-2', version: '1.0.0' });
   await client2.connect(transport2);
+  // Give it a tab of its own first -- with lazy provisioning it owns nothing
+  // until it browses, which would make the comparison below vacuous.
+  await client2.callTool({ name: 'navigate', arguments: { url: 'https://example.org' } });
   const lmt2 = await client2.callTool({ name: 'list_my_tabs', arguments: {} });
   const owned2 = JSON.parse(lmt2.content[0].text);
-  check('a second concurrent session gets a DIFFERENT default tab than the first', owned2.activeTabId !== defaultTabId, `first=${defaultTabId} second=${owned2.activeTabId}`);
+  check('a second concurrent session gets a DIFFERENT default tab than the first', owned2.activeTabId != null && owned2.activeTabId !== defaultTabId, `first=${defaultTabId} second=${owned2.activeTabId}`);
   const crossUse = await client2.callTool({ name: 'use_tab', arguments: { tabId: defaultTabId } });
   check('a second session cannot claim the first session\'s tab via use_tab', crossUse.isError === true, crossUse.content[0].text);
   await client2.close();

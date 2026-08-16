@@ -1,16 +1,26 @@
 const crypto = require('crypto');
 
+// Commands that act on the browser as a whole rather than on one of the
+// session's own tabs. These must never trigger lazy tab provisioning.
+const TABLESS_COMMANDS = new Set(['list_tabs']);
+
 class Relay {
   constructor({ token, sendToExtension }) {
     this.token = token;
     this.sendToExtension = sendToExtension;
     this.pending = new Map();
+    // sessionId -> clientState. A client whose socket drops (relay restart,
+    // flaky connection) reconnects with the same sessionId and resumes its
+    // existing tabs, instead of registering as a brand new session and
+    // stranding them as orphans in the user's window.
+    this.sessions = new Map();
   }
 
   handleClientConnected() {
     return {
       authenticated: false,
       id: crypto.randomUUID(),
+      sessionId: null,
       tabs: new Set(),
       activeTabId: null,
       groupId: null,
@@ -25,12 +35,12 @@ class Relay {
         return;
       }
       clientState.authenticated = true;
-      this.sendNewTab(
-        clientState,
-        { createGroup: true, groupTitle: `Agent session ${clientState.id.slice(0, 8)}` },
-        null,
-        () => clientSend({ type: 'auth_ok' })
-      );
+      this.resumeOrRegister(clientState, message.sessionId);
+      // Deliberately no tab here. Most agent sessions never touch the browser,
+      // and provisioning on connect meant every one of them dropped a blank tab
+      // and a tab group into the user's window regardless. Tabs are created on
+      // first actual use instead -- see the lazy branch below.
+      clientSend({ type: 'auth_ok' });
       return;
     }
 
@@ -68,13 +78,7 @@ class Relay {
     }
 
     if (message.command === 'new_tab') {
-      const params = { ...message.params };
-      if (clientState.groupId != null) {
-        params.groupId = clientState.groupId;
-      } else {
-        params.createGroup = true;
-        params.groupTitle = `Agent session ${clientState.id.slice(0, 8)}`;
-      }
+      const params = { ...message.params, ...this.groupParamsFor(clientState) };
       this.sendNewTab(clientState, params, message.id, clientSend);
       return;
     }
@@ -110,6 +114,46 @@ class Relay {
       return;
     }
 
+    // First browser command of a session that owns no tab yet: create one, then
+    // run the original command against it. Provisioning is invisible to the
+    // caller -- omitting tabId still Just Works, it just no longer costs a tab
+    // for sessions that never get here.
+    if (requestedTabId === undefined && clientState.activeTabId == null && !TABLESS_COMMANDS.has(message.command)) {
+      this.sendNewTab(clientState, this.groupParamsFor(clientState), null, (msg) => {
+        if (msg.error) {
+          clientSend({ type: 'response', id: message.id, result: undefined, error: msg.error });
+          return;
+        }
+        this.forwardCommand(clientState, message, clientSend);
+      });
+      return;
+    }
+
+    this.forwardCommand(clientState, message, clientSend);
+  }
+
+  // Adopt a prior session's tabs when a reconnecting client presents the same
+  // sessionId. Clients that send none (older adapters) simply get a fresh
+  // session, exactly as before.
+  resumeOrRegister(clientState, sessionId) {
+    if (sessionId == null) return;
+    clientState.sessionId = sessionId;
+    const previous = this.sessions.get(sessionId);
+    if (previous && previous !== clientState) {
+      clientState.id = previous.id;
+      clientState.tabs = previous.tabs;
+      clientState.activeTabId = previous.activeTabId;
+      clientState.groupId = previous.groupId;
+    }
+    this.sessions.set(sessionId, clientState);
+  }
+
+  groupParamsFor(clientState) {
+    if (clientState.groupId != null) return { groupId: clientState.groupId };
+    return { createGroup: true, groupTitle: `Agent session ${clientState.id.slice(0, 8)}` };
+  }
+
+  forwardCommand(clientState, message, clientSend) {
     const params = { ...message.params };
     if (params.tabId === undefined && clientState.activeTabId != null) {
       params.tabId = clientState.activeTabId;
@@ -157,6 +201,14 @@ class Relay {
       if (entry.clientState === clientState) {
         this.pending.delete(id);
       }
+    }
+    // Keep the session recorded so a reconnect can reclaim its tabs. A session
+    // holding no tabs has nothing to resume, so drop it rather than let the
+    // map grow for every session that ever connected.
+    if (clientState.sessionId != null
+      && clientState.tabs.size === 0
+      && this.sessions.get(clientState.sessionId) === clientState) {
+      this.sessions.delete(clientState.sessionId);
     }
   }
 }

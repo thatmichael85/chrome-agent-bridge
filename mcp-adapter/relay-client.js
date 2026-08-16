@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 
-function createRelayClient({ socket, createSocket, token, reconnectDelayMs = 1000, maxReconnectDelayMs = 15000 }) {
+function createRelayClient({ socket, createSocket, token, sessionId, reconnectDelayMs = 1000, maxReconnectDelayMs = 15000 }) {
   const pending = new Map();
   let currentSocket;
   let settled = false;
@@ -22,7 +22,10 @@ function createRelayClient({ socket, createSocket, token, reconnectDelayMs = 100
     currentSocket = sock;
 
     sock.on('open', () => {
-      sock.send(JSON.stringify({ type: 'auth', token }));
+      // sessionId lets the relay hand this client its previous tabs back after
+      // a reconnect. Omitted when undefined (JSON.stringify drops the key), so
+      // the relay falls back to registering a fresh session.
+      sock.send(JSON.stringify({ type: 'auth', token, sessionId }));
     });
 
     sock.on('message', (data) => {

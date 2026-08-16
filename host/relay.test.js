@@ -2,13 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { Relay } = require('./relay');
 
-// Auth triggers an automatic new_tab provisioning round-trip (which also
-// creates a tab group for the session) before auth_ok is sent. This helper
-// authenticates a client and completes that handshake.
-function authenticateAndProvision(relay, toExtension, token, tabId, groupId) {
+// Auth no longer provisions a tab -- that happens on first use. This helper
+// authenticates a client and then drives one new_tab round-trip so the session
+// owns a tab, which is the starting point most tests below assume.
+function authenticateAndProvision(relay, toExtension, token, tabId, groupId, sessionId) {
   const state = relay.handleClientConnected();
   const authReplies = [];
-  relay.handleClientMessage(state, { type: 'auth', token }, (m) => authReplies.push(m));
+  relay.handleClientMessage(state, { type: 'auth', token, sessionId }, (m) => authReplies.push(m));
+  relay.handleClientMessage(state, { type: 'command', id: `prov-${tabId}`, command: 'new_tab', params: { url: 'about:blank' } }, () => {});
   const provisionCall = toExtension[toExtension.length - 1];
   relay.handleExtensionMessage({ id: provisionCall.id, result: { tabId, groupId } });
   return { state, authReplies, provisionCall };
@@ -33,24 +34,104 @@ test('rejects the wrong token without provisioning a tab', () => {
   assert.strictEqual(toExtension.length, 0);
 });
 
-test('auth provisions a tab (with a fresh tab group) and does not send auth_ok until the extension confirms it', () => {
+test('auth opens no tab and acknowledges immediately', () => {
   const toExtension = [];
   const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
   const state = relay.handleClientConnected();
   const authReplies = [];
   relay.handleClientMessage(state, { type: 'auth', token: 'secret' }, (m) => authReplies.push(m));
 
-  assert.strictEqual(authReplies.length, 0, 'auth_ok must wait for tab provisioning');
+  // Sessions that never browse must not cost the user a tab or a tab group.
+  assert.strictEqual(toExtension.length, 0, 'connecting must not touch the browser');
+  assert.deepStrictEqual(authReplies, [{ type: 'auth_ok' }]);
+  assert.strictEqual(state.activeTabId, null);
+  assert.strictEqual(state.tabs.size, 0);
+});
+
+test('the first tab-targeting command provisions a tab, then runs against it', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret' }, () => {});
+
+  const sent = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'navigate', params: { url: 'https://x.com' } }, (m) => sent.push(m));
+
   assert.strictEqual(toExtension.length, 1);
-  assert.strictEqual(toExtension[0].command, 'new_tab');
+  assert.strictEqual(toExtension[0].command, 'new_tab', 'provisions before running the command');
   assert.strictEqual(toExtension[0].params.createGroup, true);
-  assert.strictEqual(typeof toExtension[0].params.groupTitle, 'string');
+  assert.strictEqual(sent.length, 0, 'the caller waits for its own command, not the provisioning');
 
   relay.handleExtensionMessage({ id: toExtension[0].id, result: { tabId: 555, groupId: 9 } });
-  assert.deepStrictEqual(authReplies, [{ type: 'auth_ok' }]);
   assert.strictEqual(state.activeTabId, 555);
-  assert.deepStrictEqual([...state.tabs], [555]);
   assert.strictEqual(state.groupId, 9);
+
+  assert.strictEqual(toExtension.length, 2, 'the original command follows');
+  assert.strictEqual(toExtension[1].command, 'navigate');
+  assert.strictEqual(toExtension[1].params.tabId, 555, 'aimed at the tab just created');
+
+  relay.handleExtensionMessage({ id: toExtension[1].id, result: { ok: true } });
+  assert.deepStrictEqual(sent, [{ type: 'response', id: 'c1', result: { ok: true }, error: undefined }]);
+});
+
+test('list_tabs does not provision a tab', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret' }, () => {});
+
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'list_tabs', params: {} }, () => {});
+
+  assert.strictEqual(toExtension.length, 1);
+  assert.strictEqual(toExtension[0].command, 'list_tabs', 'forwarded directly, no new_tab first');
+  assert.strictEqual(state.tabs.size, 0);
+});
+
+test('reconnecting with the same sessionId resumes the tabs instead of opening more', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state: first } = authenticateAndProvision(relay, toExtension, 'secret', 42, 1, 'sess-a');
+  relay.handleClientDisconnected(first);
+
+  // The adapter's socket dropped and came back with the same session identity.
+  const resumed = relay.handleClientConnected();
+  const callsBefore = toExtension.length;
+  relay.handleClientMessage(resumed, { type: 'auth', token: 'secret', sessionId: 'sess-a' }, () => {});
+
+  assert.strictEqual(toExtension.length, callsBefore, 'resuming must not open a tab');
+  assert.deepStrictEqual([...resumed.tabs], [42], 'the original tab is still owned');
+  assert.strictEqual(resumed.activeTabId, 42);
+  assert.strictEqual(resumed.groupId, 1, 'and still lands in the same tab group');
+
+  // Its first command therefore reuses tab 42 rather than provisioning again.
+  relay.handleClientMessage(resumed, { type: 'command', id: 'c1', command: 'navigate', params: { url: 'https://y.com' } }, () => {});
+  const forwarded = toExtension[toExtension.length - 1];
+  assert.strictEqual(forwarded.command, 'navigate');
+  assert.strictEqual(forwarded.params.tabId, 42);
+});
+
+test('a session that owns no tabs is not retained for resumption', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret', sessionId: 'sess-empty' }, () => {});
+
+  assert.strictEqual(relay.sessions.size, 1);
+  relay.handleClientDisconnected(state);
+  assert.strictEqual(relay.sessions.size, 0, 'nothing to resume, so nothing kept');
+});
+
+test('a different sessionId gets its own tabs, not the previous session\'s', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state: first } = authenticateAndProvision(relay, toExtension, 'secret', 42, 1, 'sess-a');
+  relay.handleClientDisconnected(first);
+
+  const other = relay.handleClientConnected();
+  relay.handleClientMessage(other, { type: 'auth', token: 'secret', sessionId: 'sess-b' }, () => {});
+
+  assert.strictEqual(other.tabs.size, 0);
+  assert.strictEqual(other.activeTabId, null);
 });
 
 test('commands without an explicit tabId get the session active tabId injected', () => {

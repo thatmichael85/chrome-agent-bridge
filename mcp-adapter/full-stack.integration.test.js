@@ -133,7 +133,9 @@ test('close_tab: omitting tabId closes the session\'s current active tab (matche
     client = new Client({ name: 'fullstack-closetab-test', version: '1.0.0' });
     await client.connect(transport);
 
-    // Auth-time provisioning assigns tabId 100 as this session's active tab.
+    // Tabs are provisioned on first use, not at auth, so take one first --
+    // this is what assigns tabId 100 as the session's active tab.
+    await client.callTool({ name: 'navigate', arguments: { url: 'https://example.com' } });
     const closeResult = await client.callTool({ name: 'close_tab', arguments: {} });
     assert.notStrictEqual(closeResult.isError, true, `close_tab with no tabId should succeed: ${JSON.stringify(closeResult)}`);
     assert.deepStrictEqual(closeTabCalls, [{ tabId: 100 }]);

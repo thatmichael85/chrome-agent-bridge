@@ -155,6 +155,25 @@ test('close_tab removes the tab from ownership and clears activeTabId if it was 
   assert.deepStrictEqual(sent, [{ type: 'response', id: 'c3', result: { ok: true }, error: undefined }]);
 });
 
+test('closing the last owned tab clears the stale groupId so a later new_tab creates a fresh group', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state } = authenticateAndProvision(relay, toExtension, 'secret', 1, 7);
+
+  // Session's only tab gets closed -- Chrome auto-deletes the now-empty
+  // group 7 as a side effect, so the relay must not keep referencing it.
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'close_tab', params: { tabId: 1 } }, () => {});
+  relay.handleExtensionMessage({ id: toExtension[toExtension.length - 1].id, result: { ok: true } });
+
+  assert.strictEqual(state.tabs.size, 0);
+  assert.strictEqual(state.groupId, null, 'a deleted group must not be remembered as still valid');
+
+  relay.handleClientMessage(state, { type: 'command', id: 'c2', command: 'new_tab', params: { url: 'https://x.com' } }, () => {});
+  const newTabCall = toExtension[toExtension.length - 1];
+  assert.strictEqual(newTabCall.params.groupId, undefined, 'must not reference the deleted group');
+  assert.strictEqual(newTabCall.params.createGroup, true, 'must create a fresh group instead');
+});
+
 test('two clients get their own auto-provisioned tabs/groups and their own responses routed correctly', () => {
   const toExtension = [];
   const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });

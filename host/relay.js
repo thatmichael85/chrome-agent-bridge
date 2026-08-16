@@ -87,6 +87,11 @@ class Relay {
               const remaining = [...clientState.tabs];
               clientState.activeTabId = remaining.length ? remaining[0] : null;
             }
+            if (clientState.tabs.size === 0) {
+              // Chrome auto-deletes a tab group once its last tab closes --
+              // don't keep referencing a group that no longer exists.
+              clientState.groupId = null;
+            }
           }
           clientSend(msg);
         },

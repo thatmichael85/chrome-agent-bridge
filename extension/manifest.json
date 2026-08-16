@@ -3,12 +3,20 @@
   "name": "Chrome Agent Bridge",
   "version": "1.0.0",
   "description": "Lets local MCP agents (Claude Code, Codex) control this browser via a local relay. No debug port.",
-  "permissions": ["tabs", "scripting", "activeTab", "nativeMessaging"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_title": "Chrome Agent Bridge"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArMra8pJfI2kov4MNZpVf1Zalah1mzqvHSAjVyoppnApjcI/5zGiP0rJfDj+A4nSKstLobd9bDe1tzzx3l8RJwmAu2nVIJOdgtdHzoa9q/TNbHzQGUKgxgoo54Xh0sso8NhSVzhRri4CNbqBKhJLhOnwkugctGRflizob/eoOqWq089uoNaDF6+ZbiB6i5jr4hSbQc5El+Gqy/B+jMkgbnElAXg0NMQuBLtDPXjp4cJeuSI8tQU7UyhU9o2ZXfAf6Wvux4fvBO9EBk0EV2ykVOiqeY0JIMuJ9MbxkBmV2djD54BUdkZqWeqXQUHwGN+ttsj3CXCpFpmuIc2iMbhe+2QIDAQAB"
 }

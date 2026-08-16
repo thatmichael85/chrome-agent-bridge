@@ -88,5 +88,10 @@ Then remove the extension from `chrome://extensions`.
 ## Tests
 
 ```bash
+# Automated suite (no Chrome needed — includes a full-stack integration test
+# that runs the real adapter + relay with a scripted fake extension):
 node --test lib/*.test.js host/*.test.js mcp-adapter/*.test.js scripts/*.test.js
+
+# Live smoke test against the real, running Chrome (extension loaded):
+node scripts/smoke.js
 ```

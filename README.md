@@ -38,8 +38,10 @@ npm install
 node scripts/install.js
 ```
 
-This generates a stable extension keypair/ID, writes the native-messaging-host
-manifest Chrome needs (into
+This generates a stable extension keypair/ID, writes a host wrapper script
+(`host/run-host.sh`, pinning the absolute node path — Chrome spawns
+native-messaging hosts with a minimal PATH that won't find Homebrew's node),
+writes the native-messaging-host manifest Chrome needs (into
 `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`), and
 registers the MCP server with both `claude mcp add -s user` and `codex mcp add`.
 

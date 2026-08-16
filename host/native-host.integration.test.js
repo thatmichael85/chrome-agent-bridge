@@ -9,17 +9,17 @@ const { encodeMessage, MessageDecoder } = require('../lib/framing');
 
 test('native-host.js: real process relays an authenticated command to a fake extension and back', async () => {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cab-integration-'));
+  // Pre-write a config with a non-default port: the real Chrome-spawned host
+  // may own 8787 on this machine, and a second bind would silently leave the
+  // test client talking to the real relay (whose token differs) -> auth_error.
+  const config = { token: 'test-token-' + Date.now(), port: 8790 + (process.pid % 100) };
+  fs.writeFileSync(path.join(tmpHome, 'config.json'), JSON.stringify(config));
   const child = spawn(process.execPath, [path.join(__dirname, 'native-host.js')], {
     env: { ...process.env, CHROME_AGENT_BRIDGE_HOME: tmpHome },
   });
 
   let ws;
   try {
-    const configPath = path.join(tmpHome, 'config.json');
-    for (let i = 0; i < 50 && !fs.existsSync(configPath); i++) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
     const decoder = new MessageDecoder((msg) => {
       child.stdin.write(encodeMessage({ id: msg.id, result: { echoed: msg.command } }));

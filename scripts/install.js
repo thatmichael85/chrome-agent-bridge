@@ -8,6 +8,7 @@ const { buildNativeMessagingManifest, ensureManifestKey } = require('./install-h
 const REPO_ROOT = path.join(__dirname, '..');
 const MANIFEST_PATH = path.join(REPO_ROOT, 'extension', 'manifest.json');
 const HOST_SCRIPT_PATH = path.join(REPO_ROOT, 'host', 'native-host.js');
+const HOST_WRAPPER_PATH = path.join(REPO_ROOT, 'host', 'run-host.sh');
 const ADAPTER_PATH = path.join(REPO_ROOT, 'mcp-adapter', 'index.js');
 const NATIVE_HOSTS_DIR = path.join(
   os.homedir(),
@@ -35,9 +36,19 @@ function main() {
   fs.chmodSync(HOST_SCRIPT_PATH, 0o755);
   fs.chmodSync(ADAPTER_PATH, 0o755);
 
+  step('write host wrapper script', () => {
+    // Chrome spawns native-messaging hosts with a minimal PATH that may not
+    // include this node's directory, so the wrapper pins the absolute path.
+    fs.writeFileSync(
+      HOST_WRAPPER_PATH,
+      `#!/bin/bash\nexec "${process.execPath}" "${HOST_SCRIPT_PATH}"\n`
+    );
+    fs.chmodSync(HOST_WRAPPER_PATH, 0o755);
+  });
+
   step('write native messaging host manifest', () => {
     fs.mkdirSync(NATIVE_HOSTS_DIR, { recursive: true });
-    const hostManifest = buildNativeMessagingManifest({ extensionId, hostScriptPath: HOST_SCRIPT_PATH });
+    const hostManifest = buildNativeMessagingManifest({ extensionId, hostScriptPath: HOST_WRAPPER_PATH });
     fs.writeFileSync(
       path.join(NATIVE_HOSTS_DIR, `${hostManifest.name}.json`),
       JSON.stringify(hostManifest, null, 2) + '\n'

@@ -6,6 +6,8 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { loadOrCreateConfig } = require('../lib/config');
 const { createRelayClient } = require('./relay-client');
 
+// tabId is optional on most tools: omitting it targets your session's
+// current active tab (auto-provisioned on connect, switchable with use_tab).
 const TOOLS = [
   ['navigate', 'Navigate a tab to a URL', { url: z.string(), tabId: z.number().optional() }],
   ['click', 'Click an element matching a CSS selector', { selector: z.string(), tabId: z.number().optional() }],
@@ -16,10 +18,12 @@ const TOOLS = [
   ['get_html', 'Get outerHTML of an element or the whole page', { selector: z.string().optional(), tabId: z.number().optional() }],
   ['evaluate', 'Evaluate a JS expression in the page context and return the result', { expression: z.string(), tabId: z.number().optional() }],
   ['list_tabs', 'List all open tabs', {}],
-  ['new_tab', 'Open a new tab at a URL', { url: z.string() }],
-  ['switch_tab', 'Focus a tab by id', { tabId: z.number() }],
+  ['new_tab', 'Open a new tab at a URL. It joins your session\'s tab group and becomes your active default tab.', { url: z.string() }],
+  ['switch_tab', 'Focus a tab by id in the browser UI', { tabId: z.number() }],
   ['close_tab', 'Close a tab by id', { tabId: z.number() }],
   ['wait_for', 'Wait for a CSS selector to appear in the page', { selector: z.string(), timeoutMs: z.number().optional(), tabId: z.number().optional() }],
+  ['use_tab', 'Switch which of your own tabs subsequent commands target by default when tabId is omitted. No browser round-trip.', { tabId: z.number() }],
+  ['list_my_tabs', 'List the tabIds you own and your current active default tab. No browser round-trip.', {}],
 ];
 
 async function main() {

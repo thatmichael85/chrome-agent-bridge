@@ -31,6 +31,36 @@ See `docs/superpowers/specs/2026-08-13-chrome-agent-bridge-design.md` for the
 full design and `docs/superpowers/plans/2026-08-13-chrome-agent-bridge.md` for
 how it was built.
 
+### Sessions, tabs, and concurrent agents
+
+`host/relay.js` is the one persistent, shared piece — Chrome spawns it once
+and it stays alive as long as the extension does, regardless of how many
+agent sessions connect and disconnect. Because multiple agents (or multiple
+Claude Code / Codex sessions) can be talking to it at once, it gives each
+connecting session its own isolated default tab automatically:
+
+- On connect (after auth), the relay opens a new tab for that session and
+  puts it in its own labeled, colored Chrome tab group.
+- Any tool call that omits `tabId` targets that session's current active
+  tab — never an ambiguous "whatever tab is focused" shared with other
+  agents.
+- `new_tab` opens another tab in the *same* session's group and becomes its
+  new active default.
+- `use_tab({tabId})` switches which of your *own* tabs is the default,
+  entirely relay-side — no browser round-trip. Trying to `use_tab` a tabId
+  you don't own fails with `not your tab: <id>`.
+- `list_my_tabs()` lists the tabIds you own and your current active tab,
+  also with no round-trip.
+- Two concurrent sessions never get the same default tab and can't
+  `use_tab` each other's tabs — verified in `scripts/smoke.js` and
+  `host/relay.test.js`.
+
+**If you edit `host/relay.js` or `host/native-host.js`:** the running relay
+process won't pick up the change — Chrome only respawns it when the
+extension's native-messaging connection drops. After editing, kill the
+running process (`pkill -f native-host.js`) and let the extension's
+reconnect logic (in `background.js`) spawn a fresh one within ~2s.
+
 ## Setup
 
 ```bash
@@ -60,8 +90,10 @@ existing extension keypair/ID and re-registers the MCP servers.
 
 `navigate`, `click`, `type`, `press_key`, `screenshot`, `get_text`,
 `get_html`, `evaluate`, `list_tabs`, `new_tab`, `switch_tab`, `close_tab`,
-`wait_for` — identical set, identical behavior, in both Claude Code and
-Codex.
+`wait_for`, `use_tab`, `list_my_tabs` — identical set, identical behavior,
+in both Claude Code and Codex. On every tool that takes `tabId`, omitting it
+targets your session's current active tab (see "Sessions, tabs, and
+concurrent agents" above).
 
 ## Security
 

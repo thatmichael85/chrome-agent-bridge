@@ -53,7 +53,15 @@ const commands = {
   },
   async new_tab(params) {
     const tab = await chrome.tabs.create({ url: params.url });
-    return { tabId: tab.id };
+    let groupId = null;
+    if (params.groupId != null) {
+      await chrome.tabs.group({ tabIds: [tab.id], groupId: params.groupId });
+      groupId = params.groupId;
+    } else if (params.createGroup) {
+      groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+      await chrome.tabGroups.update(groupId, { title: params.groupTitle || 'Agent session', color: 'blue' });
+    }
+    return { tabId: tab.id, groupId };
   },
   async switch_tab(params) {
     await chrome.tabs.update(params.tabId, { active: true });

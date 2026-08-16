@@ -5,6 +5,7 @@
   "description": "Lets local MCP agents (Claude Code, Codex) control this browser via a local relay. No debug port.",
   "permissions": [
     "tabs",
+    "tabGroups",
     "scripting",
     "activeTab",
     "nativeMessaging"

@@ -27,15 +27,29 @@ function check(label, ok, detail) {
   check('connect to adapter/relay', true);
 
   const tools = await client.listTools();
-  check('13 tools exposed', tools.tools.length === 13, tools.tools.map((t) => t.name).join(', '));
+  check('15 tools exposed', tools.tools.length === 15, tools.tools.map((t) => t.name).join(', '));
 
   const lt = await client.callTool({ name: 'list_tabs', arguments: {} });
   const tabs = JSON.parse(lt.content[0].text);
   check('list_tabs returns real tabs', Array.isArray(tabs) && tabs.length > 0, `${tabs.length} tabs`);
 
+  const lmt = await client.callTool({ name: 'list_my_tabs', arguments: {} });
+  const owned = JSON.parse(lmt.content[0].text);
+  check('session auto-owns 1 tab on connect (no explicit new_tab needed)', owned.tabIds.length === 1, JSON.stringify(owned));
+  const defaultTabId = owned.activeTabId;
+
+  const navDefault = await client.callTool({ name: 'navigate', arguments: { url: 'https://example.com' } });
+  check('navigate with no tabId targets the auto-provisioned default tab', !navDefault.isError, JSON.stringify(JSON.parse(navDefault.content[0].text)));
+
   const nt = await client.callTool({ name: 'new_tab', arguments: { url: 'https://example.com' } });
-  const { tabId } = JSON.parse(nt.content[0].text);
-  check('new_tab', Number.isInteger(tabId), `tabId ${tabId}`);
+  const { tabId, groupId } = JSON.parse(nt.content[0].text);
+  check('new_tab returns a tabId and joins a tab group', Number.isInteger(tabId) && Number.isInteger(groupId), `tabId ${tabId}, groupId ${groupId}`);
+
+  const useTab = await client.callTool({ name: 'use_tab', arguments: { tabId: defaultTabId } });
+  check('use_tab switches the active default with no browser round-trip', !useTab.isError, JSON.stringify(JSON.parse(useTab.content[0].text)));
+
+  const badUse = await client.callTool({ name: 'use_tab', arguments: { tabId: 999999999 } });
+  check('use_tab rejects a tabId this session does not own', badUse.isError === true, badUse.content[0].text);
 
   try {
     await client.callTool({ name: 'wait_for', arguments: { selector: 'h1', tabId } });
@@ -54,9 +68,21 @@ function check(label, ok, detail) {
     check('click on missing selector fails cleanly', bad.isError === true, bad.content[0].text);
   } finally {
     await client.callTool({ name: 'close_tab', arguments: { tabId } });
-    console.log('cleanup: scratch tab closed');
-    await client.close();
+    console.log('cleanup: scratch tab closed (session default tab is left open, per policy)');
   }
+
+  // Second concurrent client, simulating a second agent, to prove isolation.
+  const transport2 = new StdioClientTransport({ command: process.execPath, args: [ADAPTER_PATH] });
+  const client2 = new Client({ name: 'smoke-test-2', version: '1.0.0' });
+  await client2.connect(transport2);
+  const lmt2 = await client2.callTool({ name: 'list_my_tabs', arguments: {} });
+  const owned2 = JSON.parse(lmt2.content[0].text);
+  check('a second concurrent session gets a DIFFERENT default tab than the first', owned2.activeTabId !== defaultTabId, `first=${defaultTabId} second=${owned2.activeTabId}`);
+  const crossUse = await client2.callTool({ name: 'use_tab', arguments: { tabId: defaultTabId } });
+  check('a second session cannot claim the first session\'s tab via use_tab', crossUse.isError === true, crossUse.content[0].text);
+  await client2.close();
+
+  await client.close();
 })().catch((err) => {
   console.error('smoke test crashed:', err.message);
   process.exit(1);

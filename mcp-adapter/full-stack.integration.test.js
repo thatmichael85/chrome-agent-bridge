@@ -58,9 +58,9 @@ test('full stack: MCP tool calls flow through adapter and relay to the extension
     await client.connect(transport);
 
     const tools = await client.listTools();
-    assert.strictEqual(tools.tools.length, 13);
+    assert.strictEqual(tools.tools.length, 15);
     const names = tools.tools.map((t) => t.name);
-    for (const expected of ['navigate', 'click', 'screenshot', 'list_tabs', 'evaluate', 'wait_for']) {
+    for (const expected of ['navigate', 'click', 'screenshot', 'list_tabs', 'evaluate', 'wait_for', 'use_tab', 'list_my_tabs']) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
     }
 

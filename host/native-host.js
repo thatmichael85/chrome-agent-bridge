@@ -32,6 +32,7 @@ function main() {
         ws.send(JSON.stringify(reply));
       });
     });
+    ws.on('close', () => relay.handleClientDisconnected(state));
   });
 
   return { wss, config };

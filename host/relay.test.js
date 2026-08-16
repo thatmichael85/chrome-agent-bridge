@@ -68,10 +68,20 @@ test('commands with an explicit tabId are not overridden by the session default'
   const toExtension = [];
   const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
   const { state } = authenticateAndProvision(relay, toExtension, 'secret', 42, 1);
+  // Take a second tab so the explicit id can differ from the session default.
+  // (This used to pass tabId 999 -- a tab the session never owned -- which the
+  // ownership guard now correctly rejects. The point of the test is that an
+  // explicit id beats the injected default, so use one the session owns.)
+  relay.handleClientMessage(state, { type: 'command', id: 'c0', command: 'new_tab', params: { url: 'https://y.com' } }, () => {});
+  const ntCall = toExtension[toExtension.length - 1];
+  relay.handleExtensionMessage({ id: ntCall.id, result: { tabId: 77, groupId: 1 } });
+  assert.strictEqual(state.activeTabId, 77, 'the newly opened tab is the session default');
 
-  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'navigate', params: { url: 'https://x.com', tabId: 999 } }, () => {});
+  const sent = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'navigate', params: { url: 'https://x.com', tabId: 42 } }, (m) => sent.push(m));
+  assert.strictEqual(sent.length, 0, 'an owned tabId must not be rejected');
   const forwarded = toExtension[toExtension.length - 1];
-  assert.deepStrictEqual(forwarded.params, { url: 'https://x.com', tabId: 999 });
+  assert.deepStrictEqual(forwarded.params, { url: 'https://x.com', tabId: 42 });
 });
 
 test('a second new_tab call joins the existing session group instead of creating a new one', () => {
@@ -216,3 +226,64 @@ test('disconnecting a client cleans up only its own pending entries', () => {
   relay.handleExtensionMessage({ id: callB.id, result: 'fromB' });
   assert.deepStrictEqual(sentB, [{ type: 'response', id: 'b1', result: 'fromB', error: undefined }]);
 });
+
+// Ownership used to be checked only in the use_tab branch, so an explicit
+// tabId on any other command was forwarded unchecked -- and list_tabs hands
+// out every tabId in the browser. These guard that hole staying shut.
+
+test('an explicit tabId belonging to another session is rejected, not forwarded', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state: stateA } = authenticateAndProvision(relay, toExtension, 'secret', 1, 7);
+  authenticateAndProvision(relay, toExtension, 'secret', 2, 8);
+
+  const before = toExtension.length;
+  const sent = [];
+  relay.handleClientMessage(stateA, { type: 'command', id: 'a1', command: 'navigate', params: { tabId: 2, url: 'https://evil.example' } }, (m) => sent.push(m));
+
+  assert.deepStrictEqual(sent, [{ type: 'response', id: 'a1', result: undefined, error: 'not your tab: 2' }]);
+  assert.strictEqual(toExtension.length, before, 'nothing may reach the extension');
+});
+
+test('an explicit tabId the user owns (never provisioned to any session) is rejected', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state } = authenticateAndProvision(relay, toExtension, 'secret', 1, 7);
+
+  const before = toExtension.length;
+  const sent = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'evaluate', params: { tabId: 999, expression: 'document.cookie' } }, (m) => sent.push(m));
+
+  assert.deepStrictEqual(sent, [{ type: 'response', id: 'c1', result: undefined, error: 'not your tab: 999' }]);
+  assert.strictEqual(toExtension.length, before);
+});
+
+test('close_tab cannot close a tab the session does not own', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state: stateA } = authenticateAndProvision(relay, toExtension, 'secret', 1, 7);
+  const { state: stateB } = authenticateAndProvision(relay, toExtension, 'secret', 2, 8);
+
+  const before = toExtension.length;
+  const sent = [];
+  relay.handleClientMessage(stateA, { type: 'command', id: 'a1', command: 'close_tab', params: { tabId: 2 } }, (m) => sent.push(m));
+
+  assert.deepStrictEqual(sent, [{ type: 'response', id: 'a1', result: undefined, error: 'not your tab: 2' }]);
+  assert.strictEqual(toExtension.length, before);
+  assert.ok(stateB.tabs.has(2), 'the other session keeps its tab');
+});
+
+test('switch_tab cannot signal on a tab the session does not own', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state: stateA } = authenticateAndProvision(relay, toExtension, 'secret', 1, 7);
+  authenticateAndProvision(relay, toExtension, 'secret', 2, 8);
+
+  const before = toExtension.length;
+  const sent = [];
+  relay.handleClientMessage(stateA, { type: 'command', id: 'a1', command: 'switch_tab', params: { tabId: 2 } }, (m) => sent.push(m));
+
+  assert.deepStrictEqual(sent, [{ type: 'response', id: 'a1', result: undefined, error: 'not your tab: 2' }]);
+  assert.strictEqual(toExtension.length, before);
+});
+

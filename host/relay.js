@@ -36,6 +36,16 @@ class Relay {
 
     if (message.type !== 'command') return;
 
+    // Ownership applies to EVERY tab-targeting command, not just use_tab.
+    // list_tabs hands out every tabId in the browser, so without this guard a
+    // session could pass one explicitly and navigate/click/evaluate/close
+    // against another session's tabs -- or the user's own.
+    const requestedTabId = message.params && message.params.tabId;
+    if (requestedTabId !== undefined && !clientState.tabs.has(requestedTabId)) {
+      clientSend({ type: 'response', id: message.id, result: undefined, error: `not your tab: ${requestedTabId}` });
+      return;
+    }
+
     if (message.command === 'use_tab') {
       const tabId = message.params && message.params.tabId;
       if (!clientState.tabs.has(tabId)) {

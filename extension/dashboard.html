@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chrome Agent Bridge — Activity &amp; Site Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1120;
+      --surface: #131c31;
+      --surface-2: #1e293b;
+      --border: #26354d;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.14);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.15);
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --red-soft: rgba(239, 68, 68, 0.15);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13.5px;
+      line-height: 1.45;
+    }
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .brand-sub {
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--green-soft);
+      color: #4ade80;
+      border: 1px solid rgba(34, 197, 94, 0.35);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+    .live-pill.offline {
+      background: var(--red-soft);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px 13px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn:hover {
+      border-color: var(--accent);
+      background: #243249;
+    }
+    .btn-danger:hover {
+      border-color: var(--red);
+      color: #f87171;
+    }
+    .container {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: 22px 28px 48px;
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 18px;
+    }
+    .kpi-label {
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .kpi-value {
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+    .kpi-foot {
+      color: var(--muted);
+      font-size: 11.5px;
+      margin-top: 4px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 20px;
+      align-items: start;
+    }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+    .panel-header {
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+    .panel-body {
+      padding: 12px 14px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .domain-row, .session-row {
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      margin-bottom: 6px;
+      background: rgba(30, 41, 59, 0.45);
+      transition: all 0.12s;
+    }
+    .domain-row:hover, .session-row:hover {
+      border-color: var(--border);
+      background: var(--surface-2);
+    }
+    .domain-row.selected, .session-row.selected {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 600;
+    }
+    .row-sub {
+      color: var(--muted);
+      font-size: 11.5px;
+      margin-top: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .pill-count {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .toolbar {
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .filter-group {
+      display: inline-flex;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      overflow: hidden;
+    }
+    .filter-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .filter-btn.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .search-input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 6px 12px;
+      font-size: 12.5px;
+      width: 280px;
+    }
+    .search-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .active-filters {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: rgba(56, 189, 248, 0.06);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .active-filters.hidden {
+      display: none;
+    }
+    .filter-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-weight: 600;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+    th {
+      text-align: left;
+      padding: 10px 14px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.5);
+    }
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(38, 53, 77, 0.6);
+      vertical-align: top;
+    }
+    tr:hover td {
+      background: rgba(30, 41, 59, 0.45);
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .badge-visit {
+      background: var(--green-soft);
+      color: #4ade80;
+    }
+    .badge-cmd {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .badge-err {
+      background: var(--red-soft);
+      color: #f87171;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+    }
+    .url-link {
+      color: var(--accent);
+      text-decoration: none;
+      word-break: break-all;
+    }
+    .url-link:hover {
+      text-decoration: underline;
+    }
+    .session-chip {
+      display: inline-block;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 2px 7px;
+      border-radius: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+    .session-chip:hover {
+      border-color: var(--accent);
+    }
+    .focus-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--accent);
+      border-radius: 5px;
+      padding: 2px 7px;
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .focus-btn:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+    .empty-state {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted);
+    }
+    @media (max-width: 1024px) {
+      .layout { grid-template-columns: 1fr; }
+      .kpis { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div>
+        <div class="brand-title">Chrome Agent Bridge — Site &amp; Activity Monitor</div>
+        <div class="brand-sub">Real-time audit log of sites visited and commands executed by your local MCP agents (user personal tabs are never logged)</div>
+      </div>
+    </div>
+    <div class="actions">
+      <span id="liveStatusPill" class="live-pill">
+        <span class="dot"></span>
+        <span id="liveStatusText">Live Connected</span>
+      </span>
+      <button id="refreshBtn" class="btn">Refresh</button>
+      <button id="exportBtn" class="btn">Export JSON</button>
+      <button id="clearBtn" class="btn btn-danger">Clear Log</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Total Site Visits</div>
+        <div id="kpiVisits" class="kpi-value">0</div>
+        <div class="kpi-foot">Navigations &amp; link transitions in agent tabs</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Unique Domains Visited</div>
+        <div id="kpiDomains" class="kpi-value">0</div>
+        <div class="kpi-foot">Distinct hostnames accessed by agents</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Agent Commands Executed</div>
+        <div id="kpiCommands" class="kpi-value">0</div>
+        <div class="kpi-foot">Clicks, evaluations, reads, screenshots, forms</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Agent Sessions</div>
+        <div id="kpiSessions" class="kpi-value">0</div>
+        <div id="kpiSessionsSub" class="kpi-foot">Active &amp; historical MCP sessions</div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <div class="panel">
+          <div class="panel-header">
+            <span>Sites &amp; Domains Visited</span>
+            <span id="domainCountBadge" style="color:var(--muted); font-size:12px;">0 domains</span>
+          </div>
+          <div id="domainsList" class="panel-body"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span>Agent Sessions (<code style="font-size:11.5px;">&lt;model&gt;-&lt;id&gt;</code>)</span>
+            <span id="sessionCountBadge" style="color:var(--muted); font-size:12px;">0 sessions</span>
+          </div>
+          <div id="sessionsList" class="panel-body"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="toolbar">
+          <div class="filter-group">
+            <button id="filterAllBtn" class="filter-btn">All Activity</button>
+            <button id="filterSitesBtn" class="filter-btn active">Site Visits Only</button>
+            <button id="filterCommandsBtn" class="filter-btn">Commands Only</button>
+            <button id="filterErrorsBtn" class="filter-btn">Errors / Blocked</button>
+          </div>
+          <input id="searchInput" type="search" class="search-input" placeholder="Search URL, domain, title, selector, session..." />
+        </div>
+
+        <div id="activeFiltersBar" class="active-filters hidden"></div>
+
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:140px;">Time</th>
+                <th style="width:175px;">Session</th>
+                <th style="width:110px;">Event</th>
+                <th>Site / URL / Details</th>
+                <th style="width:95px;">Tab</th>
+              </tr>
+            </thead>
+            <tbody id="activityTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

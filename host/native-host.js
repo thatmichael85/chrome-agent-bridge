@@ -4,15 +4,19 @@ const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
 const { encodeMessage, MessageDecoder } = require('../lib/framing');
-const { loadOrCreateConfig } = require('../lib/config');
+const { loadOrCreateConfig, resolveConfigDir } = require('../lib/config');
+const { ActivityLog } = require('../lib/activity-log');
 const { Relay } = require('./relay');
 
 function main() {
-  const config = loadOrCreateConfig();
+  const configDir = resolveConfigDir();
+  const config = loadOrCreateConfig(configDir);
+  const activityLog = new ActivityLog({ configDir });
   const pidFile = path.join(os.tmpdir(), `chrome-agent-bridge-${config.port}.pid`);
 
   const relay = new Relay({
     token: config.token,
+    activityLog,
     sendToExtension: (msg) => {
       process.stdout.write(encodeMessage(msg));
     },
@@ -74,7 +78,7 @@ function main() {
   }
 
   const wss = startServer();
-  return { wss, config };
+  return { wss, config, activityLog, relay };
 }
 
 if (require.main === module) {

@@ -158,6 +158,57 @@ selector that doesn't match returns an MCP error naming the selector, not
 a silent no-op. If the extension isn't loaded or Chrome isn't running, the
 adapter fails to start with a clear stderr message rather than hanging.
 
+## Activity & Site Monitoring
+
+`chrome-agent-bridge` records a real-time audit log of every site visited and command executed by connected agent sessions in `~/.chrome-agent-bridge/activity.jsonl` (`0600` permissions, 5 MB automatic rotation).
+
+It captures **all** agent site visits — not only explicit `navigate` / `new_tab` calls, but also in-page link clicks (`click`), form submissions, HTTP redirects, and SPA route transitions (`history.pushState`) inside agent-owned tabs.
+
+### Three Ways to Monitor Agent Browsing
+
+1. **Chrome Extension Toolbar Popup (`extension/popup.html`)**
+   Click the **Chrome Agent Bridge** icon in Chrome's toolbar to see:
+   - Live connection status and KPI counters (**Site Visits**, **Domains**, **Actions**, **Active Sessions**).
+   - **Top Visited Sites** chips (click any domain to filter).
+   - Live feed of recent sites visited and actions taken, with one-click **Tab `#<id> →`** buttons to jump straight to that agent tab.
+
+2. **Full Chrome Extension Dashboard (`chrome-extension://<extension-id>/dashboard.html`)**
+   Click **Full Dashboard ↗** in the popup to open the full-page monitoring console inside the extension's isolated origin (no extra HTTP ports or localhost CSRF exposure):
+   - Interactive **Sites & Domains Visited** breakdown and **Agent Sessions (`<model>-<sessionid>`)** cards.
+   - Live streaming activity table filterable by **Site Visits Only**, **Commands Only**, **Errors / Blocked**, domain, session, or full-text search.
+   - One-click **Export JSON** and **Clear Log**.
+
+3. **Terminal CLI (`npm run logs` / `node scripts/logs.js`)**
+   Inspect agent browsing history or tail activity live from your terminal (works even when Chrome is closed):
+   ```bash
+   # Summary of top visited domains + recent activity
+   npm run logs
+
+   # Show only site visits and navigations
+   npm run logs -- --sites
+
+   # Full table of all visited domains with visit & command counts
+   npm run logs -- --domains
+
+   # Filter by domain or session (<model>-<sessionid>)
+   npm run logs -- --domain github.com
+   npm run logs -- --session c8a50c80
+
+   # Live tail of agent site visits and commands in real time
+   npm run logs -- --follow
+   npm run logs -- --sites --follow
+
+   # Raw JSONL output (e.g. for piping to jq) or clear history
+   npm run logs -- --json
+   npm run logs -- --clear
+   ```
+
+### Privacy & Redaction Guarantees
+- **User personal tabs are never logged:** Both `extension/background.js` and `host/relay.js` enforce strict session-tab ownership checks (`findOwnerByTabId(tabId)`). Browsing in your own personal tabs is never sent to or recorded by the activity log.
+- **Form inputs & secrets are redacted:** `type` commands record `{ selector, textLength, redacted: true }` and **never** store `params.text`. Single printable character keys in `press_key` are redacted as `[REDACTED_CHAR]`.
+- **Sensitive URL tokens are scrubbed:** Query parameters matching `token`, `access_token`, `id_token`, `api_key`, `secret`, `password`, `code`, `session`, `sig`, or `jwt` (and OAuth `#access_token=...` fragments) are automatically replaced with `[REDACTED]`.
+- **Page content & user tab lists are never dumped:** `get_text`, `get_html`, `screenshot`, and `list_tabs` log only summary counts (`returnedChars`, `returnedBytes`, `returnedTabCount`), never raw page contents or the user's open tabs.
+
 ## Security
 
 - The local WebSocket server binds `127.0.0.1` only, never `0.0.0.0`.

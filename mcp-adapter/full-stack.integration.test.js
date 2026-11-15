@@ -212,6 +212,14 @@ test('full stack eval: LLM session auto-creates <model>-<sessionid> tab group, g
     assert.strictEqual(newTabCalls.length, 2);
     assert.strictEqual(newTabCalls[1].createGroup, true);
     assert.strictEqual(newTabCalls[1].groupTitle, newTabCalls[0].groupTitle);
+
+    // 5. Verify activity.jsonl captured the site visits and commands for this session
+    const logPath = path.join(tmpHome, 'activity.jsonl');
+    assert.ok(fs.existsSync(logPath), 'activity.jsonl is written in CHROME_AGENT_BRIDGE_HOME');
+    const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const visitedDomains = lines.filter((e) => e.type === 'site_visit').map((e) => e.domain);
+    assert.ok(visitedDomains.includes('first.example'));
+    assert.ok(visitedDomains.includes('respawn.example'));
   } finally {
     if (client) await client.close().catch(() => {});
     host.kill();

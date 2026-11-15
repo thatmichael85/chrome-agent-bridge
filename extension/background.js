@@ -3,6 +3,14 @@ const HOST_NAME = 'com.chromeagentbridge.host';
 let port = null;
 let reconnectTimer = null;
 
+// Track tabs and tab groups created/owned by agent sessions so we never stream
+// the human user's personal tab URLs over native messaging.
+const agentTabIds = new Set();
+const agentGroupIds = new Set();
+const lastReportedSigByTab = new Map();
+const visitDebounceByTab = new Map();
+const pendingUiRequests = new Map();
+
 // Tabs an agent has asked the user to look at. switch_tab never changes focus;
 // it raises a signal here, and the signal clears only when the user actually
 // visits the tab (or closes it). See switch_tab below.
@@ -29,17 +37,53 @@ async function clearSignal(tabId) {
   }
 }
 
+function isAgentTab(tabId, tab) {
+  if (agentTabIds.has(tabId)) return true;
+  if (tab && tab.groupId != null && agentGroupIds.has(tab.groupId)) {
+    agentTabIds.add(tabId);
+    return true;
+  }
+  return false;
+}
+
+function emitTabVisit(tabId, url, title, trigger) {
+  if (!port || !url || url === 'about:blank') return;
+  if (!/^https?:|^file:/i.test(url)) return;
+  const sig = `${url}\0${title || ''}`;
+  if (lastReportedSigByTab.get(tabId) === sig) return;
+  lastReportedSigByTab.set(tabId, sig);
+  try {
+    port.postMessage({
+      event: 'tab_visit',
+      tabId,
+      url,
+      title: title || null,
+      trigger,
+    });
+  } catch {}
+}
+
 chrome.tabs.onActivated.addListener(({ tabId }) => clearSignal(tabId));
 chrome.tabs.onRemoved.addListener((tabId) => {
   clearSignal(tabId);
+  agentTabIds.delete(tabId);
+  lastReportedSigByTab.delete(tabId);
+  if (visitDebounceByTab.has(tabId)) {
+    clearTimeout(visitDebounceByTab.get(tabId));
+    visitDebounceByTab.delete(tabId);
+  }
   if (port) {
     try {
       port.postMessage({ event: 'tab_removed', tabId });
     } catch {}
   }
 });
+
 if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
   chrome.tabGroups.onRemoved.addListener((group) => {
+    if (group && group.id != null) {
+      agentGroupIds.delete(group.id);
+    }
     if (port && group && group.id != null) {
       try {
         port.postMessage({ event: 'group_removed', groupId: group.id });
@@ -47,6 +91,38 @@ if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
     }
   });
 }
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!port || !isAgentTab(tabId, tab)) return;
+
+  if (changeInfo.status === 'complete') {
+    if (visitDebounceByTab.has(tabId)) {
+      clearTimeout(visitDebounceByTab.get(tabId));
+      visitDebounceByTab.delete(tabId);
+    }
+    const currentUrl = (tab && tab.url) || changeInfo.url;
+    emitTabVisit(tabId, currentUrl, tab ? tab.title : null, 'load_complete');
+    return;
+  }
+
+  // SPA navigation (history.pushState / replaceState / hash change) where URL
+  // updates while the tab is already complete or without a full reload cycle.
+  if (changeInfo.url && changeInfo.status !== 'loading') {
+    if (visitDebounceByTab.has(tabId)) {
+      clearTimeout(visitDebounceByTab.get(tabId));
+    }
+    const timer = setTimeout(async () => {
+      visitDebounceByTab.delete(tabId);
+      try {
+        const latestTab = await chrome.tabs.get(tabId);
+        emitTabVisit(tabId, latestTab.url || changeInfo.url, latestTab.title || null, 'url_change');
+      } catch {
+        emitTabVisit(tabId, changeInfo.url, tab ? tab.title : null, 'url_change');
+      }
+    }, 150);
+    visitDebounceByTab.set(tabId, timer);
+  }
+});
 
 function connect() {
   if (port) return;
@@ -59,6 +135,10 @@ function connect() {
   activePort.onMessage.addListener((msg) => handleMessage(activePort, msg));
   activePort.onDisconnect.addListener(() => {
     if (port === activePort) port = null;
+    for (const [, responder] of pendingUiRequests) {
+      try { responder({ ok: false, error: 'Native host disconnected' }); } catch {}
+    }
+    pendingUiRequests.clear();
     if (!reconnectTimer) {
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -69,7 +149,43 @@ function connect() {
 }
 
 async function handleMessage(activePort, message) {
+  if (!message || typeof message !== 'object') return;
+
+  if (message.event === 'activity_response' && message.id) {
+    const sessions = message.result && message.result.summary && message.result.summary.sessions;
+    if (Array.isArray(sessions)) {
+      for (const s of sessions) {
+        if (s.active && Array.isArray(s.tabIds)) {
+          for (const tId of s.tabIds) agentTabIds.add(tId);
+        }
+        if (s.active && s.groupId != null) {
+          agentGroupIds.add(s.groupId);
+        }
+      }
+    }
+    const responder = pendingUiRequests.get(message.id);
+    if (responder) {
+      pendingUiRequests.delete(message.id);
+      responder({ ok: true, ...message.result });
+    }
+    return;
+  }
+
+  if (message.event === 'activity_entry' && message.entry) {
+    if (message.entry.tabId != null) {
+      agentTabIds.add(message.entry.tabId);
+    }
+    if (message.entry.groupId != null) {
+      agentGroupIds.add(message.entry.groupId);
+    }
+    try {
+      chrome.runtime.sendMessage({ type: 'activity_entry', entry: message.entry }).catch(() => {});
+    } catch {}
+    return;
+  }
+
   const { id, command, params } = message;
+  if (!command) return;
   try {
     const result = await runCommand(command, params || {});
     activePort.postMessage({ id, result });
@@ -77,6 +193,62 @@ async function handleMessage(activePort, message) {
     activePort.postMessage({ id, error: String((err && err.message) || err) });
   }
 }
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || sender.id !== chrome.runtime.id) return false;
+
+  if (msg.type === 'get_activity' || msg.type === 'clear_activity') {
+    if (!port) connect();
+    if (!port) {
+      sendResponse({ ok: false, error: 'Native host is not connected' });
+      return false;
+    }
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const timeout = setTimeout(() => {
+      if (pendingUiRequests.has(reqId)) {
+        pendingUiRequests.delete(reqId);
+        sendResponse({ ok: false, error: 'Timed out waiting for native host' });
+      }
+    }, 3000);
+
+    pendingUiRequests.set(reqId, (payload) => {
+      clearTimeout(timeout);
+      sendResponse(payload);
+    });
+
+    try {
+      port.postMessage({ event: 'subscribe_activity', enabled: true });
+      port.postMessage({
+        event: msg.type,
+        id: reqId,
+        params: msg.params || {},
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      pendingUiRequests.delete(reqId);
+      sendResponse({ ok: false, error: String(err.message || err) });
+    }
+    return true;
+  }
+
+  if (msg.type === 'focus_tab' && msg.tabId != null) {
+    (async () => {
+      try {
+        const tab = await chrome.tabs.get(Number(msg.tabId));
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId != null) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  return false;
+});
 
 async function targetTabId(params) {
   if (params.tabId) return params.tabId;
@@ -106,6 +278,8 @@ const commands = {
   },
   async navigate(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
+    lastReportedSigByTab.delete(tabId);
     await chrome.tabs.update(tabId, { url: params.url });
     await waitForLoad(tabId);
     return { tabId, url: params.url };
@@ -120,6 +294,7 @@ const commands = {
     // tab strip, in the session's labeled group) — just not focused. An agent
     // that genuinely needs the tab in front calls switch_tab explicitly.
     const tab = await chrome.tabs.create({ url: params.url, active: false });
+    agentTabIds.add(tab.id);
     let groupId = null;
     if (params.groupId != null) {
       try {
@@ -133,6 +308,9 @@ const commands = {
       groupId = await chrome.tabs.group({ tabIds: [tab.id] });
       await chrome.tabGroups.update(groupId, { title: params.groupTitle || 'Agent session', color: 'blue' });
     }
+    if (groupId != null) {
+      agentGroupIds.add(groupId);
+    }
     return { tabId: tab.id, groupId };
   },
   async switch_tab(params) {
@@ -142,8 +320,10 @@ const commands = {
     // global rather than per-tab: the user is by definition looking somewhere
     // else, so it has to be visible from wherever they are.
     const tabId = params.tabId;
+    agentTabIds.add(tabId);
     const tab = await chrome.tabs.get(tabId);
     const grouped = tab.groupId != null && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE;
+    if (grouped) agentGroupIds.add(tab.groupId);
     signalledTabs.set(tabId, grouped ? tab.groupId : null);
     await chrome.action.setBadgeText({ text: '●' });
     await chrome.action.setBadgeBackgroundColor({ color: '#d93025' });
@@ -153,11 +333,14 @@ const commands = {
     return { ok: true, focused: false, signalled: true };
   },
   async close_tab(params) {
+    agentTabIds.delete(params.tabId);
+    lastReportedSigByTab.delete(params.tabId);
     await chrome.tabs.remove(params.tabId);
     return { ok: true };
   },
   async screenshot(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const tab = await chrome.tabs.get(tabId);
     // captureVisibleTab can only ever capture the window's *active* tab. Agent
     // tabs open in the background, so without this the capture would silently
@@ -195,6 +378,7 @@ const commands = {
   },
   async get_text(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (selector) => {
@@ -208,6 +392,7 @@ const commands = {
   },
   async get_html(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (selector) => {
@@ -220,6 +405,7 @@ const commands = {
   },
   async click(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (selector) => {
@@ -236,6 +422,7 @@ const commands = {
   },
   async type(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (selector, text) => {
@@ -260,6 +447,7 @@ const commands = {
   },
   async press_key(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (key) => {
@@ -273,6 +461,7 @@ const commands = {
   },
   async evaluate(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       world: 'MAIN',
@@ -283,6 +472,7 @@ const commands = {
   },
   async wait_for(params) {
     const tabId = await targetTabId(params);
+    agentTabIds.add(tabId);
     const timeoutMs = params.timeoutMs || 10000;
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
@@ -304,6 +494,9 @@ const commands = {
 async function runCommand(command, params) {
   const handler = commands[command];
   if (!handler) throw new Error(`unknown command: ${command}`);
+  if (params && typeof params.tabId === 'number') {
+    agentTabIds.add(params.tabId);
+  }
   return handler(params);
 }
 

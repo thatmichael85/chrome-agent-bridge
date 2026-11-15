@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { Relay } = require('./relay');
+const { ActivityLog } = require('../lib/activity-log');
 
 // Auth no longer provisions a tab -- that happens on first use. This helper
 // authenticates a client and then drives one new_tab round-trip so the session
@@ -480,5 +484,126 @@ test('agent-initiated close_tab does NOT trigger the user-removed-group error on
   assert.strictEqual(toExtension[toExtension.length - 1].command, 'new_tab');
   assert.strictEqual(toExtension[toExtension.length - 1].params.createGroup, true);
 });
+
+test('activity logging: records site_visit and command events for agent tabs, ignores user personal tabs, deduplicates repeated onUpdated events, and redacts sensitive inputs', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cab-relay-activity-'));
+  try {
+    const activityLog = new ActivityLog({ configDir: tmpDir });
+    const toExtension = [];
+    const relay = new Relay({
+      token: 'secret',
+      activityLog,
+      sendToExtension: (m) => toExtension.push(m),
+    });
+
+    const state = relay.handleClientConnected();
+    relay.handleClientMessage(state, {
+      type: 'auth',
+      token: 'secret',
+      sessionId: 'c8a50c80-9e86-4407',
+      model: 'gemini-4-argon',
+    }, () => {});
+
+    // 1. User's personal tab (tabId 777, not in state.tabs) fires tab_visit -> MUST BE DROPPED
+    relay.handleExtensionMessage({
+      event: 'tab_visit',
+      tabId: 777,
+      url: 'https://personal-bank.example.com/account',
+      title: 'My Personal Bank',
+    });
+    assert.strictEqual(activityLog.entries.length, 0, 'personal tabs must never be logged');
+
+    // 2. Agent calls navigate -> auto-provisions tab 10 in group 5, then navigates to moneysmart.sg
+    relay.handleClientMessage(state, {
+      type: 'command',
+      id: 'nav-1',
+      command: 'navigate',
+      params: { url: 'https://www.moneysmart.sg/dashboard/claims?token=secret999' },
+    }, () => {});
+    // Respond to internal auto-provision new_tab (originalId === null, should not clutter command log)
+    const provCall = toExtension[0];
+    relay.handleExtensionMessage({ id: provCall.id, result: { tabId: 10, groupId: 5 } });
+
+    // Extension fires tab_visit when page finishes loading with title, before/around navigate completion
+    relay.handleExtensionMessage({
+      event: 'tab_visit',
+      tabId: 10,
+      url: 'https://www.moneysmart.sg/dashboard/claims?token=secret999',
+      title: 'MoneySmart Claims Dashboard',
+      trigger: 'load_complete',
+    });
+    // Duplicate tab_visit for same URL on same tab (e.g. subframe / favicon update) -> deduplicated
+    relay.handleExtensionMessage({
+      event: 'tab_visit',
+      tabId: 10,
+      url: 'https://www.moneysmart.sg/dashboard/claims?token=secret999',
+      title: 'MoneySmart Claims Dashboard',
+      trigger: 'load_complete',
+    });
+
+    const navCall = toExtension[1];
+    relay.handleExtensionMessage({
+      id: navCall.id,
+      result: { tabId: 10, url: 'https://www.moneysmart.sg/dashboard/claims?token=secret999' },
+    });
+
+    const visits = activityLog.query({ type: 'site_visit' });
+    assert.strictEqual(visits.length, 1, 'exactly one site_visit logged after deduplication');
+    assert.strictEqual(visits[0].domain, 'www.moneysmart.sg');
+    assert.strictEqual(visits[0].title, 'MoneySmart Claims Dashboard');
+    assert.strictEqual(visits[0].groupTitle, 'gemini-4-argon-c8a50c80');
+    assert.ok(!visits[0].url.includes('secret999'), 'sensitive query token redacted');
+
+    // 3. Agent types into a form -> logs current tab URL/domain automatically, redacts text
+    relay.handleClientMessage(state, {
+      type: 'command',
+      id: 'type-1',
+      command: 'type',
+      params: { selector: '#policyNumber', text: 'TR/02855641' },
+    }, () => {});
+    const typeCall = toExtension[toExtension.length - 1];
+    relay.handleExtensionMessage({ id: typeCall.id, result: { ok: true } });
+
+    const typeEntries = activityLog.query({ command: 'type' });
+    assert.strictEqual(typeEntries.length, 1);
+    assert.strictEqual(typeEntries[0].domain, 'www.moneysmart.sg', 'inherits tab current domain');
+    assert.strictEqual(typeEntries[0].meta.selector, '#policyNumber');
+    assert.strictEqual(typeEntries[0].meta.redacted, true);
+    assert.ok(!JSON.stringify(typeEntries[0]).includes('TR/02855641'), 'typed text never stored');
+
+    // 4. Agent clicks a link that causes an in-page navigation to /dashboard/claims/history
+    relay.handleClientMessage(state, {
+      type: 'command',
+      id: 'click-1',
+      command: 'click',
+      params: { selector: 'a.history-link' },
+    }, () => {});
+    const clickCall = toExtension[toExtension.length - 1];
+    relay.handleExtensionMessage({ id: clickCall.id, result: { ok: true } });
+    relay.handleExtensionMessage({
+      event: 'tab_visit',
+      tabId: 10,
+      url: 'https://www.moneysmart.sg/dashboard/claims/history',
+      title: 'Claim History - MoneySmart',
+      trigger: 'url_change',
+    });
+
+    const allVisits = activityLog.query({ type: 'site_visit' });
+    assert.strictEqual(allVisits.length, 2, 'link click navigation is captured via tab_visit');
+    assert.strictEqual(allVisits[0].url, 'https://www.moneysmart.sg/dashboard/claims/history');
+
+    // 5. Extension dashboard queries get_activity over native messaging
+    relay.handleExtensionMessage({ event: 'get_activity', id: 'req-act-1', params: { limit: 10 } });
+    const actResp = toExtension[toExtension.length - 1];
+    assert.strictEqual(actResp.event, 'activity_response');
+    assert.strictEqual(actResp.id, 'req-act-1');
+    assert.strictEqual(actResp.result.summary.totalSiteVisits, 2);
+    assert.strictEqual(actResp.result.summary.topDomains[0].domain, 'www.moneysmart.sg');
+    assert.strictEqual(actResp.result.summary.sessions[0].active, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 

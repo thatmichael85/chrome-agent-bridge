@@ -17,7 +17,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Chrome Agent Bridge"
+    "default_title": "Chrome Agent Bridge — Activity Monitor",
+    "default_popup": "popup.html"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArMra8pJfI2kov4MNZpVf1Zalah1mzqvHSAjVyoppnApjcI/5zGiP0rJfDj+A4nSKstLobd9bDe1tzzx3l8RJwmAu2nVIJOdgtdHzoa9q/TNbHzQGUKgxgoo54Xh0sso8NhSVzhRri4CNbqBKhJLhOnwkugctGRflizob/eoOqWq089uoNaDF6+ZbiB6i5jr4hSbQc5El+Gqy/B+jMkgbnElAXg0NMQuBLtDPXjp4cJeuSI8tQU7UyhU9o2ZXfAf6Wvux4fvBO9EBk0EV2ykVOiqeY0JIMuJ9MbxkBmV2djD54BUdkZqWeqXQUHwGN+ttsj3CXCpFpmuIc2iMbhe+2QIDAQAB"
 }

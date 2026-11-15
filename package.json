@@ -5,7 +5,8 @@
   "description": "Local MCP server letting Claude Code and Codex control the user's normal Chrome, no debug port.",
   "scripts": {
     "test": "node --test lib/**/*.test.js host/**/*.test.js scripts/**/*.test.js",
-    "install-bridge": "node scripts/install.js"
+    "install-bridge": "node scripts/install.js",
+    "logs": "node scripts/logs.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

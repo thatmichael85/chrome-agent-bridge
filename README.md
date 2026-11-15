@@ -114,13 +114,20 @@ or pass a tabId at all for straight-line, single-tab work. Just call
 `navigate`, `click`, `get_text`, etc. and they land on your own tab.
 
 You get that tab automatically, on first use — the first command that
-needs one creates it (in the background, in its own labeled tab group so
-the user can see which tabs are yours) and runs against it. Connecting
-alone opens nothing: a session that never browses costs the user no tabs,
-which matters because every agent session connects whether or not it ever
-touches Chrome. Call `list_my_tabs` any time to check what you own and
-which one is currently active, with no network/browser cost — it returns
-an empty list until your first browser command.
+needs one creates it (in the background, in its own `<model>-<sessionid>`
+labeled tab group so the user can see which tabs are yours) and runs
+against it. Connecting alone opens nothing: a session that never browses
+costs the user no tabs, which matters because every agent session connects
+whether or not it ever touches Chrome. Call `list_my_tabs` any time to
+check what you own and which one is currently active, with no
+network/browser cost — it returns an empty list until your first browser
+command.
+
+**If the user deletes your tab group (or closes all its tabs):** your next
+browser command returns `error: your tab group was removed by the user —
+call new_tab or navigate (without tabId) to respawn a fresh tab group and
+continue your work`. Simply call `navigate({url})` (without `tabId`) or
+`new_tab({url})` to respawn a fresh `<model>-<sessionid>` tab group.
 
 **Agent tabs never steal focus — this is enforced, not advisory.** Tabs
 you open are created in the background: visible in the user's tab strip,

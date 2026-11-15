@@ -66,7 +66,8 @@ function check(label, ok, detail) {
     check('evaluate', result === 'Example Domain', JSON.stringify(result));
 
     const shot = await client.callTool({ name: 'screenshot', arguments: { tabId } });
-    check('screenshot', shot.content[0].text.includes('data:image/png'), `${shot.content[0].text.length} chars`);
+    const imgBlock = shot.content && shot.content[0];
+    check('screenshot', imgBlock && imgBlock.type === 'image' && typeof imgBlock.data === 'string' && imgBlock.data.length > 0, `${imgBlock ? imgBlock.mimeType : 'none'} (${imgBlock && imgBlock.data ? imgBlock.data.length : 0} base64 chars)`);
 
     const bad = await client.callTool({ name: 'click', arguments: { selector: '#does-not-exist', tabId } });
     check('click on missing selector fails cleanly', bad.isError === true, bad.content[0].text);

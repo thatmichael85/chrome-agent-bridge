@@ -14,6 +14,13 @@ const NATIVE_HOSTS_DIR = path.join(
   os.homedir(),
   'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts'
 );
+const AGY_MCP_CONFIG_PATH = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+const SKILL_SOURCE_PATH = path.join(REPO_ROOT, '.agents', 'skills', 'chrome-agent-bridge', 'SKILL.md');
+const SKILL_TARGETS = [
+  path.join(os.homedir(), '.claude', 'skills', 'chrome-agent-bridge', 'SKILL.md'),
+  path.join(os.homedir(), '.codex', 'skills', 'chrome-agent-bridge', 'SKILL.md'),
+  path.join(os.homedir(), '.gemini', 'config', 'skills', 'chrome-agent-bridge', 'SKILL.md'),
+];
 
 function step(label, fn) {
   process.stdout.write(`- ${label}... `);
@@ -68,6 +75,33 @@ function main() {
   step('add MCP server to Codex', () => {
     execFileSync('codex', ['mcp', 'add', 'chrome-agent-bridge', '--', 'node', ADAPTER_PATH], { stdio: 'inherit' });
   });
+
+  step('register MCP server with Antigravity (~/.gemini/config/mcp_config.json)', () => {
+    fs.mkdirSync(path.dirname(AGY_MCP_CONFIG_PATH), { recursive: true });
+    let cfg = {};
+    if (fs.existsSync(AGY_MCP_CONFIG_PATH)) {
+      const raw = fs.readFileSync(AGY_MCP_CONFIG_PATH, 'utf8').trim();
+      if (raw) cfg = JSON.parse(raw);
+    }
+    if (!cfg.mcpServers || typeof cfg.mcpServers !== 'object') {
+      cfg.mcpServers = {};
+    }
+    cfg.mcpServers['chrome-agent-bridge'] = {
+      command: process.execPath,
+      args: [ADAPTER_PATH],
+    };
+    fs.writeFileSync(AGY_MCP_CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
+  });
+
+  if (fs.existsSync(SKILL_SOURCE_PATH)) {
+    step('install chrome-agent-bridge skill for Claude Code, Codex, and Antigravity', () => {
+      const skillContent = fs.readFileSync(SKILL_SOURCE_PATH, 'utf8');
+      for (const target of SKILL_TARGETS) {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, skillContent);
+      }
+    });
+  }
 
   console.log('\nNext step: load the extension unpacked.');
   console.log('  1. Open chrome://extensions');

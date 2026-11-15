@@ -145,3 +145,76 @@ test('close_tab: omitting tabId closes the session\'s current active tab (matche
     fs.rmSync(tmpHome, { recursive: true, force: true });
   }
 });
+
+test('full stack eval: LLM session auto-creates <model>-<sessionid> tab group, gets notified when human deletes group, and respawns cleanly', async () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cab-fullstack-group-eval-'));
+  const config = { token: 'fullstack-token-' + Date.now(), port: 9090 + (process.pid % 100) };
+  fs.writeFileSync(path.join(tmpHome, 'config.json'), JSON.stringify(config));
+
+  const host = spawn(process.execPath, [path.join(__dirname, '..', 'host', 'native-host.js')], {
+    env: { ...process.env, CHROME_AGENT_BRIDGE_HOME: tmpHome },
+  });
+
+  let client;
+  try {
+    let nextTabId = 500;
+    let nextGroupId = 10;
+    const newTabCalls = [];
+    const decoder = new MessageDecoder((msg) => {
+      if (msg.command === 'new_tab') {
+        newTabCalls.push(msg.params);
+        host.stdin.write(encodeMessage({ id: msg.id, result: { tabId: nextTabId++, groupId: nextGroupId++ } }));
+      } else {
+        host.stdin.write(encodeMessage({ id: msg.id, result: { ok: true, tabId: msg.params && msg.params.tabId } }));
+      }
+    });
+    host.stdout.on('data', (chunk) => decoder.push(chunk));
+
+    const WebSocket = require('ws');
+    for (let i = 0; i < 50; i++) {
+      const probe = new WebSocket(`ws://127.0.0.1:${config.port}`);
+      const up = await new Promise((resolve) => {
+        probe.once('open', () => resolve(true));
+        probe.once('error', () => resolve(false));
+      });
+      probe.close();
+      if (up) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [path.join(__dirname, 'index.js')],
+      env: { ...process.env, CHROME_AGENT_BRIDGE_HOME: tmpHome, CHROME_AGENT_BRIDGE_MODEL: 'eval-llm-model' },
+    });
+    client = new Client({ name: 'eval-llm-client', version: '1.0.0' });
+    await client.connect(transport);
+
+    // 1. First command creates a tab group named eval-llm-model-<8hex>
+    const nav1 = await client.callTool({ name: 'navigate', arguments: { url: 'https://first.example' } });
+    assert.notStrictEqual(nav1.isError, true);
+    assert.strictEqual(newTabCalls.length, 1);
+    assert.strictEqual(newTabCalls[0].createGroup, true);
+    assert.match(newTabCalls[0].groupTitle, /^eval-llm-model-[0-9a-f]{8}$/);
+
+    // 2. Simulate human deleting the tab group in Chrome (extension sends group_removed)
+    host.stdin.write(encodeMessage({ event: 'group_removed', groupId: 10 }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // 3. Next LLM command gets the explicit group-removed message instructing it to respawn
+    const afterRemove = await client.callTool({ name: 'get_text', arguments: {} });
+    assert.strictEqual(afterRemove.isError, true);
+    assert.match(afterRemove.content[0].text, /tab group was removed by the user.*respawn/i);
+
+    // 4. LLM respawns by calling navigate without tabId -> creates a brand-new tab group with same <model>-<sessionid> title
+    const nav2 = await client.callTool({ name: 'navigate', arguments: { url: 'https://respawn.example' } });
+    assert.notStrictEqual(nav2.isError, true);
+    assert.strictEqual(newTabCalls.length, 2);
+    assert.strictEqual(newTabCalls[1].createGroup, true);
+    assert.strictEqual(newTabCalls[1].groupTitle, newTabCalls[0].groupTitle);
+  } finally {
+    if (client) await client.close().catch(() => {});
+    host.kill();
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});

@@ -2,7 +2,9 @@ const crypto = require('crypto');
 
 // Commands that act on the browser as a whole rather than on one of the
 // session's own tabs. These must never trigger lazy tab provisioning.
-const TABLESS_COMMANDS = new Set(['list_tabs']);
+const TABLESS_COMMANDS = new Set(['list_tabs', 'reload_extension']);
+
+const GROUP_REMOVED_MESSAGE = 'your tab group was removed by the user — call new_tab or navigate (without tabId) to respawn a fresh tab group and continue your work';
 
 class Relay {
   constructor({ token, sendToExtension }) {
@@ -14,17 +16,22 @@ class Relay {
     // existing tabs, instead of registering as a brand new session and
     // stranding them as orphans in the user's window.
     this.sessions = new Map();
+    this.clients = new Set();
   }
 
   handleClientConnected() {
-    return {
+    const state = {
       authenticated: false,
       id: crypto.randomUUID(),
       sessionId: null,
+      model: null,
       tabs: new Set(),
       activeTabId: null,
       groupId: null,
+      groupRemovedNoticePending: false,
     };
+    this.clients.add(state);
+    return state;
   }
 
   handleClientMessage(clientState, message, clientSend) {
@@ -35,6 +42,7 @@ class Relay {
         return;
       }
       clientState.authenticated = true;
+      if (message.model) clientState.model = message.model;
       this.resumeOrRegister(clientState, message.sessionId);
       // Deliberately no tab here. Most agent sessions never touch the browser,
       // and provisioning on connect meant every one of them dropped a blank tab
@@ -46,13 +54,28 @@ class Relay {
 
     if (message.type !== 'command') return;
 
+    if (message.params && message.params.model) {
+      clientState.model = message.params.model;
+    }
+
     // Ownership applies to EVERY tab-targeting command, not just use_tab.
     // list_tabs hands out every tabId in the browser, so without this guard a
     // session could pass one explicitly and navigate/click/evaluate/close
     // against another session's tabs -- or the user's own.
     const requestedTabId = message.params && message.params.tabId;
     if (requestedTabId !== undefined && !clientState.tabs.has(requestedTabId)) {
+      if (clientState.groupRemovedNoticePending) {
+        clientState.groupRemovedNoticePending = false;
+        clientSend({ type: 'response', id: message.id, result: undefined, error: GROUP_REMOVED_MESSAGE });
+        return;
+      }
       clientSend({ type: 'response', id: message.id, result: undefined, error: `not your tab: ${requestedTabId}` });
+      return;
+    }
+
+    if (clientState.groupRemovedNoticePending && !TABLESS_COMMANDS.has(message.command) && message.command !== 'list_my_tabs') {
+      clientState.groupRemovedNoticePending = false;
+      clientSend({ type: 'response', id: message.id, result: undefined, error: GROUP_REMOVED_MESSAGE });
       return;
     }
 
@@ -78,37 +101,38 @@ class Relay {
     }
 
     if (message.command === 'new_tab') {
-      const params = { ...message.params, ...this.groupParamsFor(clientState) };
+      const { model, ...restParams } = message.params || {};
+      const params = { ...restParams, ...this.groupParamsFor(clientState) };
       this.sendNewTab(clientState, params, message.id, clientSend);
       return;
     }
 
     if (message.command === 'close_tab') {
-      const params = { ...message.params };
+      const { model, ...params } = message.params || {};
       if (params.tabId === undefined && clientState.activeTabId != null) {
         params.tabId = clientState.activeTabId;
       }
       const closedTabId = params.tabId;
+      // Remove from clientState.tabs before sending close_tab so the
+      // extension's chrome.tabs.onRemoved ("tab_removed") event knows this was
+      // an intentional agent-initiated close rather than the user deleting the
+      // tab/group.
+      clientState.tabs.delete(closedTabId);
+      if (clientState.activeTabId === closedTabId) {
+        const remaining = [...clientState.tabs];
+        clientState.activeTabId = remaining.length ? remaining[0] : null;
+      }
+      if (clientState.tabs.size === 0) {
+        // Chrome auto-deletes a tab group once its last tab closes --
+        // don't keep referencing a group that no longer exists.
+        clientState.groupId = null;
+      }
       const internalId = crypto.randomUUID();
       this.pending.set(internalId, {
         clientState,
         command: 'close_tab',
         originalId: message.id,
-        clientSend: (msg) => {
-          if (!msg.error) {
-            clientState.tabs.delete(closedTabId);
-            if (clientState.activeTabId === closedTabId) {
-              const remaining = [...clientState.tabs];
-              clientState.activeTabId = remaining.length ? remaining[0] : null;
-            }
-            if (clientState.tabs.size === 0) {
-              // Chrome auto-deletes a tab group once its last tab closes --
-              // don't keep referencing a group that no longer exists.
-              clientState.groupId = null;
-            }
-          }
-          clientSend(msg);
-        },
+        clientSend,
       });
       this.sendToExtension({ id: internalId, command: 'close_tab', params });
       return;
@@ -144,17 +168,29 @@ class Relay {
       clientState.tabs = previous.tabs;
       clientState.activeTabId = previous.activeTabId;
       clientState.groupId = previous.groupId;
+      clientState.groupRemovedNoticePending = previous.groupRemovedNoticePending;
+      if (!clientState.model && previous.model) {
+        clientState.model = previous.model;
+      }
+      this.clients.delete(previous);
     }
     this.sessions.set(sessionId, clientState);
   }
 
+  groupTitleFor(clientState) {
+    const model = (clientState.model || 'agent').trim() || 'agent';
+    const shortSessionId = (clientState.sessionId || clientState.id).slice(0, 8);
+    return `${model}-${shortSessionId}`;
+  }
+
   groupParamsFor(clientState) {
-    if (clientState.groupId != null) return { groupId: clientState.groupId };
-    return { createGroup: true, groupTitle: `Agent session ${clientState.id.slice(0, 8)}` };
+    const groupTitle = this.groupTitleFor(clientState);
+    if (clientState.groupId != null) return { groupId: clientState.groupId, groupTitle };
+    return { createGroup: true, groupTitle };
   }
 
   forwardCommand(clientState, message, clientSend) {
-    const params = { ...message.params };
+    const { model, ...params } = message.params || {};
     if (params.tabId === undefined && clientState.activeTabId != null) {
       params.tabId = clientState.activeTabId;
     }
@@ -185,15 +221,64 @@ class Relay {
   }
 
   handleExtensionMessage(message) {
+    if (message.event === 'group_removed' && message.groupId != null) {
+      this.handleGroupRemoved(message.groupId);
+      return;
+    }
+    if (message.event === 'tab_removed' && message.tabId != null) {
+      this.handleTabRemoved(message.tabId);
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
+    if (message.error && /No tab with id|tab.*not found|No group with id/i.test(message.error)) {
+      this.markGroupRemoved(pending.clientState);
+      pending.clientSend({
+        type: 'response',
+        id: pending.originalId,
+        result: undefined,
+        error: GROUP_REMOVED_MESSAGE,
+      });
+      return;
+    }
     pending.clientSend({
       type: 'response',
       id: pending.originalId,
       result: message.result,
       error: message.error,
     });
+  }
+
+  markGroupRemoved(clientState) {
+    if (!clientState) return;
+    clientState.tabs.clear();
+    clientState.activeTabId = null;
+    clientState.groupId = null;
+    clientState.groupRemovedNoticePending = true;
+  }
+
+  handleGroupRemoved(groupId) {
+    for (const state of this.clients) {
+      if (state.groupId === groupId) {
+        this.markGroupRemoved(state);
+      }
+    }
+  }
+
+  handleTabRemoved(tabId) {
+    for (const state of this.clients) {
+      if (!state.tabs.has(tabId)) continue;
+      state.tabs.delete(tabId);
+      if (state.activeTabId === tabId) {
+        const remaining = [...state.tabs];
+        state.activeTabId = remaining.length ? remaining[0] : null;
+      }
+      if (state.tabs.size === 0) {
+        state.groupId = null;
+        state.groupRemovedNoticePending = true;
+      }
+    }
   }
 
   handleClientDisconnected(clientState) {
@@ -207,8 +292,12 @@ class Relay {
     // map grow for every session that ever connected.
     if (clientState.sessionId != null
       && clientState.tabs.size === 0
+      && !clientState.groupRemovedNoticePending
       && this.sessions.get(clientState.sessionId) === clientState) {
       this.sessions.delete(clientState.sessionId);
+    }
+    if (clientState.tabs.size === 0 && !clientState.groupRemovedNoticePending) {
+      this.clients.delete(clientState);
     }
   }
 }

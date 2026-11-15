@@ -1,6 +1,21 @@
 const crypto = require('crypto');
 
-function createRelayClient({ socket, createSocket, token, sessionId, reconnectDelayMs = 1000, maxReconnectDelayMs = 15000 }) {
+function resolveDefaultModel(env = process.env) {
+  return env.CHROME_AGENT_BRIDGE_MODEL
+    || env.AGENT_MODEL
+    || env.ANTHROPIC_MODEL
+    || env.OPENAI_MODEL
+    || env.GEMINI_MODEL
+    || env.MODEL
+    || undefined;
+}
+
+function createRelayClient({ socket, createSocket, token, sessionId, model, reconnectDelayMs = 1000, maxReconnectDelayMs = 15000 }) {
+  const effectiveModel = model || resolveDefaultModel();
+  // When using a live createSocket factory without an explicit sessionId,
+  // generate a stable session UUID so reconnects and tab group titles always
+  // have a consistent identity.
+  const effectiveSessionId = sessionId !== undefined ? sessionId : (createSocket ? (process.env.CHROME_AGENT_BRIDGE_SESSION_ID || crypto.randomUUID()) : undefined);
   const pending = new Map();
   let currentSocket;
   let settled = false;
@@ -25,7 +40,7 @@ function createRelayClient({ socket, createSocket, token, sessionId, reconnectDe
       // sessionId lets the relay hand this client its previous tabs back after
       // a reconnect. Omitted when undefined (JSON.stringify drops the key), so
       // the relay falls back to registering a fresh session.
-      sock.send(JSON.stringify({ type: 'auth', token, sessionId }));
+      sock.send(JSON.stringify({ type: 'auth', token, sessionId: effectiveSessionId, model: effectiveModel }));
     });
 
     sock.on('message', (data) => {

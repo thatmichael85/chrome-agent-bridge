@@ -1,6 +1,7 @@
 const HOST_NAME = 'com.chromeagentbridge.host';
 
 let port = null;
+let reconnectTimer = null;
 
 // Tabs an agent has asked the user to look at. switch_tab never changes focus;
 // it raises a signal here, and the signal clears only when the user actually
@@ -29,24 +30,51 @@ async function clearSignal(tabId) {
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => clearSignal(tabId));
-chrome.tabs.onRemoved.addListener((tabId) => clearSignal(tabId));
-
-function connect() {
-  port = chrome.runtime.connectNative(HOST_NAME);
-  port.onMessage.addListener(handleMessage);
-  port.onDisconnect.addListener(() => {
-    port = null;
-    setTimeout(connect, 2000);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearSignal(tabId);
+  if (port) {
+    try {
+      port.postMessage({ event: 'tab_removed', tabId });
+    } catch {}
+  }
+});
+if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
+  chrome.tabGroups.onRemoved.addListener((group) => {
+    if (port && group && group.id != null) {
+      try {
+        port.postMessage({ event: 'group_removed', groupId: group.id });
+      } catch {}
+    }
   });
 }
 
-async function handleMessage(message) {
+function connect() {
+  if (port) return;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  const activePort = chrome.runtime.connectNative(HOST_NAME);
+  port = activePort;
+  activePort.onMessage.addListener((msg) => handleMessage(activePort, msg));
+  activePort.onDisconnect.addListener(() => {
+    if (port === activePort) port = null;
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, 2000);
+    }
+  });
+}
+
+async function handleMessage(activePort, message) {
   const { id, command, params } = message;
   try {
     const result = await runCommand(command, params || {});
-    port.postMessage({ id, result });
+    activePort.postMessage({ id, result });
   } catch (err) {
-    port.postMessage({ id, error: String((err && err.message) || err) });
+    activePort.postMessage({ id, error: String((err && err.message) || err) });
   }
 }
 
@@ -72,6 +100,10 @@ function waitForLoad(tabId) {
 }
 
 const commands = {
+  async reload_extension() {
+    setTimeout(() => chrome.runtime.reload(), 50);
+    return { ok: true };
+  },
   async navigate(params) {
     const tabId = await targetTabId(params);
     await chrome.tabs.update(tabId, { url: params.url });
@@ -90,8 +122,13 @@ const commands = {
     const tab = await chrome.tabs.create({ url: params.url, active: false });
     let groupId = null;
     if (params.groupId != null) {
-      await chrome.tabs.group({ tabIds: [tab.id], groupId: params.groupId });
-      groupId = params.groupId;
+      try {
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: params.groupId });
+        groupId = params.groupId;
+      } catch (err) {
+        groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+        await chrome.tabGroups.update(groupId, { title: params.groupTitle || 'Agent session', color: 'blue' });
+      }
     } else if (params.createGroup) {
       groupId = await chrome.tabs.group({ tabIds: [tab.id] });
       await chrome.tabGroups.update(groupId, { title: params.groupTitle || 'Agent session', color: 'blue' });
@@ -162,7 +199,8 @@ const commands = {
       target: { tabId },
       func: (selector) => {
         const el = selector ? document.querySelector(selector) : document.body;
-        return el ? el.innerText : null;
+        if (!el) return null;
+        return el.innerText || el.textContent || '';
       },
       args: [params.selector || null],
     });

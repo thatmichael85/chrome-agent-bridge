@@ -368,3 +368,117 @@ test('switch_tab cannot signal on a tab the session does not own', () => {
   assert.strictEqual(toExtension.length, before);
 });
 
+test('groupTitle uses <model>-<sessionid> when model is supplied on auth', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret', sessionId: 'c8a50c80-9e86-4407', model: 'gemini-4-argon' }, () => {});
+
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'new_tab', params: { url: 'https://example.com' } }, () => {});
+  assert.strictEqual(toExtension.length, 1);
+  assert.strictEqual(toExtension[0].params.createGroup, true);
+  assert.strictEqual(toExtension[0].params.groupTitle, 'gemini-4-argon-c8a50c80');
+});
+
+test('groupTitle uses <model>-<sessionid> when model is supplied on the command and strips model from forwarded params', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret', sessionId: 'deadbeef-1234-5678' }, () => {});
+
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'navigate', params: { url: 'https://example.com', model: 'claude-sonnet-4' } }, () => {});
+  assert.strictEqual(toExtension[0].command, 'new_tab');
+  assert.strictEqual(toExtension[0].params.groupTitle, 'claude-sonnet-4-deadbeef');
+
+  relay.handleExtensionMessage({ id: toExtension[0].id, result: { tabId: 10, groupId: 3 } });
+  assert.strictEqual(toExtension[1].command, 'navigate');
+  assert.deepStrictEqual(toExtension[1].params, { url: 'https://example.com', tabId: 10 });
+});
+
+test('groupTitle falls back to agent-<sessionid> when no model is supplied', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const state = relay.handleClientConnected();
+  relay.handleClientMessage(state, { type: 'auth', token: 'secret', sessionId: '12345678-abcd' }, () => {});
+
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'new_tab', params: { url: 'https://example.com' } }, () => {});
+  assert.strictEqual(toExtension[0].params.groupTitle, 'agent-12345678');
+});
+
+test('when the user removes the tab group in Chrome, the next command informs the LLM and the following command respawns a fresh group', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state } = authenticateAndProvision(relay, toExtension, 'secret', 10, 77, 'sess-rm');
+
+  // Extension notifies the relay that Chrome tab group 77 was deleted by the user.
+  relay.handleExtensionMessage({ event: 'group_removed', groupId: 77 });
+  assert.strictEqual(state.tabs.size, 0);
+  assert.strictEqual(state.activeTabId, null);
+  assert.strictEqual(state.groupId, null);
+
+  // 1st command after group removal: tells the LLM that its group was removed and to respawn.
+  const sent1 = [];
+  const before = toExtension.length;
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'get_text', params: {} }, (m) => sent1.push(m));
+  assert.strictEqual(toExtension.length, before, 'does not silently open a tab before notifying the LLM');
+  assert.strictEqual(sent1.length, 1);
+  assert.match(sent1[0].error, /tab group was removed by the user.*respawn/i);
+
+  // 2nd command (respawn): automatically creates a brand-new tab group and executes.
+  const sent2 = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c2', command: 'navigate', params: { url: 'https://respawned.example' } }, (m) => sent2.push(m));
+  const prov = toExtension[toExtension.length - 1];
+  assert.strictEqual(prov.command, 'new_tab');
+  assert.strictEqual(prov.params.createGroup, true);
+  assert.strictEqual(prov.params.groupId, undefined);
+
+  relay.handleExtensionMessage({ id: prov.id, result: { tabId: 20, groupId: 88 } });
+  const nav = toExtension[toExtension.length - 1];
+  assert.strictEqual(nav.command, 'navigate');
+  assert.strictEqual(nav.params.tabId, 20);
+  relay.handleExtensionMessage({ id: nav.id, result: { tabId: 20, url: 'https://respawned.example' } });
+  assert.strictEqual(sent2[0].error, undefined);
+});
+
+test('when the user closes the last tab in the group (tab_removed), the LLM is notified and can respawn even if it passed the old tabId', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state } = authenticateAndProvision(relay, toExtension, 'secret', 10, 77, 'sess-tab-rm');
+
+  // Extension fires tab_removed when the user closes tab 10 in Chrome.
+  relay.handleExtensionMessage({ event: 'tab_removed', tabId: 10 });
+  assert.strictEqual(state.tabs.size, 0);
+  assert.strictEqual(state.groupId, null);
+
+  // Even if the LLM explicitly passes the old tabId: 10, it gets the group-removed notice (not a generic "not your tab").
+  const sent1 = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'click', params: { tabId: 10, selector: 'button' } }, (m) => sent1.push(m));
+  assert.match(sent1[0].error, /tab group was removed by the user.*respawn/i);
+
+  // And when it respawns via new_tab, a new group is created.
+  relay.handleClientMessage(state, { type: 'command', id: 'c2', command: 'new_tab', params: { url: 'https://fresh.example' } }, () => {});
+  const nt = toExtension[toExtension.length - 1];
+  assert.strictEqual(nt.command, 'new_tab');
+  assert.strictEqual(nt.params.createGroup, true);
+});
+
+test('agent-initiated close_tab does NOT trigger the user-removed-group error on the next command', () => {
+  const toExtension = [];
+  const relay = new Relay({ token: 'secret', sendToExtension: (m) => toExtension.push(m) });
+  const { state } = authenticateAndProvision(relay, toExtension, 'secret', 10, 77, 'sess-self-close');
+
+  // Agent closes its own tab 10; Chrome subsequently fires tab_removed and group_removed.
+  relay.handleClientMessage(state, { type: 'command', id: 'c1', command: 'close_tab', params: { tabId: 10 } }, () => {});
+  relay.handleExtensionMessage({ event: 'tab_removed', tabId: 10 });
+  relay.handleExtensionMessage({ event: 'group_removed', groupId: 77 });
+  relay.handleExtensionMessage({ id: toExtension[toExtension.length - 1].id, result: { ok: true } });
+
+  // Next command should lazily provision without complaining that the user removed the group.
+  const sent = [];
+  relay.handleClientMessage(state, { type: 'command', id: 'c2', command: 'navigate', params: { url: 'https://next.example' } }, (m) => sent.push(m));
+  assert.strictEqual(sent.length, 0);
+  assert.strictEqual(toExtension[toExtension.length - 1].command, 'new_tab');
+  assert.strictEqual(toExtension[toExtension.length - 1].params.createGroup, true);
+});
+
+
